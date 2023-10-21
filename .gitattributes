@@ -1,0 +1,12 @@
+*           text=auto
+*.py        text eol=lf
+*.c         text eol=lf
+*.cpp       text eol=lf
+*.cmake     text eol=lf
+*.mk        text eol=lf
+*.txt       text eol=lf
+*.md        text eol=lf
+*.cli       text eol=lf
+*.yang      text eol=lf
+*.api       text eol=lf
+Makefile    text eol=lf
