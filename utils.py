@@ -20,26 +20,12 @@ def rate_format(rate):
 
 
 def rate_format_str(rate):
-    rate *= 1.0
+    r, t = rate_format(rate)
 
-    if rate < 1024:
-        s = "%d" % rate
-        t = ""
-    elif rate < 1024 * 1024:
-        s = "%.2f" % (rate / 1024)
-        t = "K"
-    elif rate < 1024 * 1024 * 1024:
-        s = "%.2f" % (rate / 1024 / 1024)
-        t = "M"
-    elif rate < 1024 * 1024 * 1024 * 1024:
-        s = "%.2f" % (rate / 1024 / 1024 / 1024)
-        t = "G"
-    elif rate < 1024 * 1024 * 1024 * 1024 * 1024:
-        s = "%.2f" % (rate / 1024 / 1024 / 1024 / 1024)
-        t = "T"
+    if r == int(r):
+        s = "%d" % r
     else:
-        s = "%.2f" % (rate / 1024 / 1024 / 1024 / 1024 / 1024)
-        t = "P"
+        s = "%.2f" % r
 
     return s[:5] + t
 
@@ -64,11 +50,15 @@ class Rate(object):
             self._cur_bytes += len
             return False
         else:
-            self._pps = self._cur_pkts / (now - self._time_last)
-            self._bps = self._cur_bytes / (now - self._time_last)
+            if now >= self._time_last + 2:
+                self._cur_pkts = 0
+                self._cur_bytes = 0
+            self._pps = self._cur_pkts
+            self._bps = self._cur_bytes
             self._cur_pkts = 1
             self._cur_bytes = len
             self._time_last = now
+
             return True
 
     def status(self):

@@ -5,7 +5,7 @@ from libs.tuntap import *
 import utils
 import time
 import signal
-from scapy.all import *
+# from scapy.all import *
 import threading
 import queue
 
@@ -57,6 +57,31 @@ def parse_args():
     return parser.parse_args()
 
 
+class PacketHeader():
+    data = 1
+    control = 2
+    heartbeat = 3
+    invalid_type = 4
+    invalid_len = 5
+    format = "!BH"
+    format_size = struct.calcsize(format)
+
+
+def vpn_packet_pack(p, t):
+    return struct.pack(
+        PacketHeader.format, t, len(p)
+    ) + p
+
+
+def vpn_packet_unpack(p):
+    t, l = struct.unpack_from(PacketHeader.format, p)
+    if t >= PacketHeader.invalid_type:
+        return (PacketHeader.invalid_type, None)
+    if l + PacketHeader.format_size != len(p):
+        return (PacketHeader.invalid_len, None)
+    return (t, p[PacketHeader.format_size:])
+
+
 class VPN(object):
 
     def __init__(self, is_server, tun, local, peer):
@@ -80,10 +105,10 @@ class VPN(object):
         self._tun.close()
 
     def _tun_read(self):
-        mtu = 2048
         while True:
             try:
-                p = self._tun.read(mtu)
+                p = self._tun.read(2048)
+                p = vpn_packet_pack(p, PacketHeader.data)
                 #logging.debug("tun read:%s", IP(p).summary())
                 self._tun_read_queue.put(p)
             except Exception as e:
@@ -98,10 +123,17 @@ class VPN(object):
             except Exception as e:
                 pass
 
-    def _show_status(self):
+    def _heartbeat(self):
         index = 0
         while True:
             time.sleep(1)
+            now = time.time()
+
+            content = '%d:%f' % (index, now)
+            d = vpn_packet_pack(
+                content.encode(), PacketHeader.heartbeat)
+            self._sock.send(d)
+
             r0 = self._rx_rate.format_status()
             r1 = self._tx_rate.format_status()
             t0 = self._rx_rate.format_total()
@@ -109,14 +141,13 @@ class VPN(object):
             print(
                 "Rate(%d) "
                 "RX-TX(PPS/BPS): %s/%s-%s/%s "
-                "Total(RX/TX): %s/%s" % (index,
-                                         r0[0], r0[1], r1[0], r1[1],
-                                         t0[1], t1[1]))
+                "Total(RX/TX): %s/%s" % (
+                    index,
+                    r0[0], r0[1], r1[0], r1[1],
+                    t0[1], t1[1]))
             index += 1
 
-    def run(self):
-        mtu = 2048
-
+    def negotiate(self):
         while True:
             r, w, _ = select.select([self._sock], [self._sock], [], 1)
             if self._is_server:
@@ -124,19 +155,31 @@ class VPN(object):
                     continue
 
                 data, addr = self._sock.recvfrom(2048)
-                if data.decode() == "SYNC":
+                t, d = vpn_packet_unpack(data)
+                if t != PacketHeader.control:
+                    continue
+
+                if d.decode() == "SYNC":
                     self._peer = addr
                     self._sock.connect(addr)
-                    assert self._sock in w
-                    self._sock.send('ACK'.encode())
+                    #assert self._sock in w
+                    d = vpn_packet_pack(
+                        'ACK'.encode(), PacketHeader.control)
+                    self._sock.send(d)
                     break
             else:
                 if self._sock in w:
-                    self._sock.send('SYNC'.encode())
+                    d = vpn_packet_pack(
+                        'SYNC'.encode(), PacketHeader.control)
+                    self._sock.send(d)
+                    time.sleep(0.5)
 
                 if self._sock in r:
                     data, addr = self._sock.recvfrom(2048)
-                    if data.decode() == 'ACK':
+                    t, d = vpn_packet_unpack(data)
+                    if t != PacketHeader.control:
+                        continue
+                    if d.decode() == 'ACK':
                         self._peer = addr
                         break
 
@@ -147,10 +190,13 @@ class VPN(object):
             logging.info("client connect: %s:%d ok" %
                          (self._peer[0], self._peer[1]))
 
+    def run(self):
+        self.negotiate()
+
         if self._select_tun:
-            s = [self._sock, self._tun.handle]
+            rs = [self._sock, self._tun.handle]
         else:
-            s = [self._sock]
+            rs = [self._sock]
             thread = threading.Thread(target=self._tun_read)
             thread.daemon = True
             thread.start()
@@ -158,31 +204,53 @@ class VPN(object):
             thread.daemon = True
             thread.start()
 
-        thread = threading.Thread(target=self._show_status)
+        thread = threading.Thread(target=self._heartbeat)
         thread.daemon = True
         thread.start()
 
+        ws = []
         while True:
-            r, w, _ = select.select(s, s, [], 0)
+            need poll sock tun w
+            r, w, _ = select.select(rs, ws, [], 0)
 
             if self._sock in r:
                 p = self._sock.recv(2048)
-                self._tun_write_queue.put(p)
-                self._rx_rate.feed(len(p))
+                t, p = vpn_packet_unpack(p)
+                if t == PacketHeader.data:
+                    self._tun_write_queue.put(p)
+                    self._rx_rate.feed(len(p))
+                elif t == PacketHeader.heartbeat:
+                    #logging.info("Heartbeat recv:%s", str(p))
+                    pass
+                elif t == PacketHeader.control:
+                    logging.warn("VPN Packet control message: %s", p.decode())
+                elif t == PacketHeader.invalid_type:
+                    logging.warn("VPN Packet type invalid!")
+                elif t == PacketHeader.invalid_len:
+                    logging.warn("VPN Packet len invalid!")
+                else:
+                    logging.error("VPN Packet type:%d unknow!", t)
 
             if self._tun.handle in r:
-                send_packet = self._tun.read(mtu)
-                self._tun_read_queue.put(send_packet)
+                p = self._tun.read(2048)
+                #logging.debug("tun read:%s", IP(p).summary())
+                p = vpn_packet_pack(p, PacketHeader.data)
+                self._tun_read_queue.put(p)
 
             if self._sock in w and self._tun_read_queue.qsize() > 0:
                 p = self._tun_read_queue.get()
-                #logging.debug("sock recv:%s", IP(p).summary())
                 self._sock.send(p)
                 self._tx_rate.feed(len(p))
 
+                ws.append(self._sock)
+
             if self._tun.handle in w and self._tun_write_queue.qsize() > 0:
                 p = self._tun_write_queue.get()
+                #logging.debug("tun write:%s", IP(p).summary())
                 self._tun.write(p)
+
+                if self._tun_select:
+                    ws.append(self._tun.handle)
 
 
 if __name__ == '__main__':
