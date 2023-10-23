@@ -100,17 +100,22 @@ class VPN(object):
         if not is_server:
             self._sock.connect(peer)
         self._select_tun = not sys.platform.startswith("win")
+        # 使用socket解决windows平台下，select不支持tun文件问题
+        self._mock_sock = socket.socketpair()
 
     def __del__(self):
         self._tun.close()
 
     def _tun_read(self):
+        notify = "notify".encode()
         while True:
             try:
                 p = self._tun.read(2048)
                 p = vpn_packet_pack(p, PacketHeader.data)
                 #logging.debug("tun read:%s", IP(p).summary())
                 self._tun_read_queue.put(p)
+                # 发送socket通知，触发socket发送操作
+                self._mock_sock[1].send(notify)
             except Exception as e:
                 pass
 
@@ -152,14 +157,12 @@ class VPN(object):
             r, w, _ = select.select([self._sock], [self._sock], [], 1)
             if self._is_server:
                 if self._sock not in r:
+                    time.sleep(0.5)
                     continue
 
                 data, addr = self._sock.recvfrom(2048)
                 t, d = vpn_packet_unpack(data)
-                if t != PacketHeader.control:
-                    continue
-
-                if d.decode() == "SYNC":
+                if t == PacketHeader.control and d.decode() == "SYNC":
                     self._peer = addr
                     self._sock.connect(addr)
                     #assert self._sock in w
@@ -172,16 +175,15 @@ class VPN(object):
                     d = vpn_packet_pack(
                         'SYNC'.encode(), PacketHeader.control)
                     self._sock.send(d)
-                    time.sleep(0.5)
 
                 if self._sock in r:
                     data, addr = self._sock.recvfrom(2048)
                     t, d = vpn_packet_unpack(data)
-                    if t != PacketHeader.control:
-                        continue
-                    if d.decode() == 'ACK':
+                    if t == PacketHeader.control and d.decode() == 'ACK':
                         self._peer = addr
                         break
+                else:
+                    time.sleep(0.5)
 
         if self._is_server:
             logging.info("connect server: %s:%d ok" %
@@ -196,7 +198,7 @@ class VPN(object):
         if self._select_tun:
             rs = [self._sock, self._tun.handle]
         else:
-            rs = [self._sock]
+            rs = [self._sock, self._mock_sock[0]]
             thread = threading.Thread(target=self._tun_read)
             thread.daemon = True
             thread.start()
@@ -210,8 +212,9 @@ class VPN(object):
 
         ws = []
         while True:
-            need poll sock tun w
-            r, w, _ = select.select(rs, ws, [], 0)
+            r, w, _ = select.select(rs, ws, [], 5)
+
+            ws = []
 
             if self._sock in r:
                 p = self._sock.recv(2048)
@@ -223,11 +226,12 @@ class VPN(object):
                     #logging.info("Heartbeat recv:%s", str(p))
                     pass
                 elif t == PacketHeader.control:
-                    logging.warn("VPN Packet control message: %s", p.decode())
+                    logging.warning(
+                        "VPN Packet control message: %s", p.decode())
                 elif t == PacketHeader.invalid_type:
-                    logging.warn("VPN Packet type invalid!")
+                    logging.warning("VPN Packet type invalid!")
                 elif t == PacketHeader.invalid_len:
-                    logging.warn("VPN Packet len invalid!")
+                    logging.warning("VPN Packet len invalid!")
                 else:
                     logging.error("VPN Packet type:%d unknow!", t)
 
@@ -237,19 +241,36 @@ class VPN(object):
                 p = vpn_packet_pack(p, PacketHeader.data)
                 self._tun_read_queue.put(p)
 
-            if self._sock in w and self._tun_read_queue.qsize() > 0:
-                p = self._tun_read_queue.get()
-                self._sock.send(p)
-                self._tx_rate.feed(len(p))
+            if self._mock_sock[0] in r:
+                assert not self._select_tun
+                self._mock_sock[0].recv(32)  # drop msg
+                while self._tun_read_queue.qsize() > 0:
+                    p = self._tun_read_queue.get()
+                    self._sock.send(p)
+                    self._tx_rate.feed(len(p))
 
-                ws.append(self._sock)
+            n = self._tun_read_queue.qsize()
+            if n > 0:
+                if self._sock in w:
+                    p = self._tun_read_queue.get()
+                    self._sock.send(p)
+                    self._tx_rate.feed(len(p))
+                    n -= 1
+                if n > 0:
+                    ws.append(self._sock)
 
-            if self._tun.handle in w and self._tun_write_queue.qsize() > 0:
-                p = self._tun_write_queue.get()
-                #logging.debug("tun write:%s", IP(p).summary())
-                self._tun.write(p)
+            if not self._select_tun:
+                continue
 
-                if self._tun_select:
+            n = self._tun_write_queue.qsize()
+            if n > 0:
+                if self._tun.handle in w:
+                    p = self._tun_write_queue.get()
+                    #logging.debug("tun write:%s", IP(p).summary())
+                    self._tun.write(p)
+                    n -= 1
+
+                if n > 0:
                     ws.append(self._tun.handle)
 
 
