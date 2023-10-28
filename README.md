@@ -5,6 +5,8 @@
 #### 依赖
 
 - windows: `python -m pip install pywin32`
+- format: pip3 install autopep8
+    - autopep8 -i <xxx>.py
 
 #### python doc
 

@@ -112,7 +112,7 @@ class VPN(object):
             try:
                 p = self._tun.read(2048)
                 p = vpn_packet_pack(p, PacketHeader.data)
-                #logging.debug("tun read:%s", IP(p).summary())
+                # logging.debug("tun read:%s", IP(p).summary())
                 self._tun_read_queue.put(p)
                 # 发送socket通知，触发socket发送操作
                 self._mock_sock[1].send(notify)
@@ -122,7 +122,7 @@ class VPN(object):
     def _tun_write(self):
         while True:
             p = self._tun_write_queue.get()
-            #logging.debug("tun write:%s", IP(p).summary())
+            # logging.debug("tun write:%s", IP(p).summary())
             try:
                 self._tun.write(p)
             except Exception as e:
@@ -165,7 +165,7 @@ class VPN(object):
                 if t == PacketHeader.control and d.decode() == "SYNC":
                     self._peer = addr
                     self._sock.connect(addr)
-                    #assert self._sock in w
+                    # assert self._sock in w
                     d = vpn_packet_pack(
                         'ACK'.encode(), PacketHeader.control)
                     self._sock.send(d)
@@ -223,7 +223,7 @@ class VPN(object):
                     self._tun_write_queue.put(p)
                     self._rx_rate.feed(len(p))
                 elif t == PacketHeader.heartbeat:
-                    #logging.info("Heartbeat recv:%s", str(p))
+                    # logging.info("Heartbeat recv:%s", str(p))
                     pass
                 elif t == PacketHeader.control:
                     logging.warning(
@@ -237,7 +237,7 @@ class VPN(object):
 
             if self._tun.handle in r:
                 p = self._tun.read(2048)
-                #logging.debug("tun read:%s", IP(p).summary())
+                # logging.debug("tun read:%s", IP(p).summary())
                 p = vpn_packet_pack(p, PacketHeader.data)
                 self._tun_read_queue.put(p)
 
@@ -266,7 +266,7 @@ class VPN(object):
             if n > 0:
                 if self._tun.handle in w:
                     p = self._tun_write_queue.get()
-                    #logging.debug("tun write:%s", IP(p).summary())
+                    # logging.debug("tun write:%s", IP(p).summary())
                     self._tun.write(p)
                     n -= 1
 
