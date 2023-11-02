@@ -4,6 +4,7 @@ import time
 import logging
 import sys
 import argparse
+import json
 
 LOG_LEVELS = (
     logging.NOTSET, logging.DEBUG,
@@ -35,6 +36,7 @@ s.bind(address)
 logging.info("Service start on %s:%d", address[0], address[1])
 
 clients = {}
+forward_table = {}
 
 while True:
     r, _, _ = select.select([s], [], [], 10)
@@ -42,45 +44,66 @@ while True:
     if not r:
         if clients:
             logging.info("Drop out-of-date info:%s", str(clients))
+        if forward_table:
+            logging.info("Drop out-of-date forward table:%s",
+                         str(forward_table))
         clients = {}
+        forward_table = {}
         continue
 
     data, addr = s.recvfrom(2048)
-    try:
-        info = data.decode().split(":")
-    except Exception as e:
-        logging.error("Decode %s error(%s)", str(data), str(e))
+
+    # 1. just forward data
+    k = str(addr)
+    if k in forward_table:
+        peer_addr = forward_table[k]
+        s.sendto(data, peer_addr)
         continue
 
-    if len(info) != 2 or info[0] != "token":
+    # 2. other
+    try:
+        info = json.loads(data.decode())
+    except Exception as e:
+        logging.error("Decode %s error(%s) addr:%s  %s",
+                      str(data), str(e), k, str(forward_table))
+        continue
+
+    if "user" not in info or "action" not in info:
         logging.debug("Recv data: %s format invalid", str(info))
         continue
 
-    token = info[1]
-    if not clients.has_key(token):
-        clients[token] = {}
-
-    client = clients[token]
-    now = time.time()
-
-    logging.info("Recv client: %s:%d token:%s", addr[0], addr[1], token)
-    client[addr[0]] = (addr[1], now)
-
-    peer = None
-    for k, v in client.items():
-        if k == addr[0]:
-            continue
-        if now - v[1] > 2:  # record out of date
-            logging.debug("Record: %s:%d out of date(%.2f)",
-                          k, v[0], now - v[1])
-            del client[k]
-            continue
-
-        peer = "%s:%d" % (k, v[0])
-
-    if not peer:
+    if info["action"] not in ["peer-info", "request-forward"]:
+        logging.debug("Unknow:%s method!", info["action"])
         continue
 
-    s.sendto(peer.encode(), addr)
+    user = info["user"]
+    if user not in clients:
+        clients[user] = {}
+
+    client = clients[user]
+
+    now = time.time()
+    logging.info("Recv client: %s:%d", addr[0], addr[1])
+    client[k] = (addr[0], addr[1], now)
+
+    peer_info = None
+    for _k, _v in client.items():
+        if _k == k:
+            continue
+        if now - _v[2] > 2:  # record out of date
+            logging.debug("Record: %s:%d out of date(%.2f)",
+                          _v[0], _v[1], now - _v[2])
+            del client[_k]
+            continue
+
+        if info["action"] == "request-forward":
+            logging.info(
+                "set forward table: %s:%d => %s:%d",
+                addr[0], addr[1], _v[0], _v[1])
+            forward_table[k] = (_v[0], _v[1])
+        peer_info = {"addr": _v[0], "port": _v[1]}
+
+    if peer_info:
+        s.sendto(json.dumps(peer_info).encode(), addr)
 
 s.close()

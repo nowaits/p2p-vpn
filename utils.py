@@ -1,6 +1,11 @@
 
 import time
+import string
+import random
 
+
+def random_str(l):
+    return ''.join(random.sample(string.ascii_letters + string.digits, l))
 
 def rate_format(rate):
     rate *= 1.0

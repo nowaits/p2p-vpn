@@ -12,6 +12,8 @@ import queue
 
 import argparse
 import logging
+import json
+import traceback
 
 
 def signal_handler(signal, frame):
@@ -52,8 +54,14 @@ def parse_args():
     parser.add_argument(
         "--server", "-s", type=str, default="192.168.20.1", help="server IP")
     parser.add_argument(
-        "--port", "-p", type=int, default=4593,
-        help="server port, default 4593")
+        "--port", "-p", type=int, default=5100,
+        help="server port, default 5100")
+    parser.add_argument(
+        "--mtu", type=int, default=1400,
+        help="mtu, default 1400")
+    parser.add_argument(
+        "--timeout", type=int, default=20,
+        help="connect timeout, default 20s")
     parser.add_argument(
         "--port-range", "-r", type=int, default=100, help="port range")
     parser.add_argument(
@@ -264,7 +272,7 @@ class VPN(object):
                 p = vpn_packet_pack(p, PacketHeader.data)
                 self._tun_read_queue.put(p)
 
-            if self._mock_sock[0] in r:
+            if self._mock_sock[0] in r and self._sock in w:
                 assert not self._select_tun
                 self._mock_sock[0].recv(32)  # drop msg
                 while self._tun_read_queue.qsize() > 0:
@@ -309,11 +317,7 @@ def default_vpn_sock(local=None, peer=None):
     return s
 
 
-def gen_tran_id(l):
-    return ''.join(random.choice('0123456789ABCDEF') for i in range(l))
-
-
-def nat_tunnel_build(server, port, port_try_range, token):
+def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forward=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setblocking(False)
 
@@ -323,15 +327,31 @@ def nat_tunnel_build(server, port, port_try_range, token):
         r, w, _ = select.select([s], [s], [], 1)
         if s in r:
             data, _ = s.recvfrom(2048)
-            info = data.decode().split(":")
-            if len(info) != 2:
+            try:
+                info = json.loads(data.decode())
+            except Exception as e:
+                logging.error("Decode %s error(%s)", str(data), str(e))
+                continue
+
+            if type(info) != dict or "addr" not in info or "port" not in info:
                 logging.error("Resp:%s from server invalid!", str(info))
                 pass
-            peer_addr = (info[0], int(info[1]))
-            logging.info("Get peer addr: %s:%d", peer_addr[0], peer_addr[1])
+
+            peer_addr = (info["addr"], int(info["port"]))
+            if not request_forward:
+                logging.info("Get peer addr: %s:%d",
+                             peer_addr[0], peer_addr[1])
+            else:
+                logging.info("Forward tunnel with peer addr: %s:%d ok!",
+                             peer_addr[0], peer_addr[1])
+                s.connect((server, port))
+                return s
 
         if s in w:
-            content = "token:%s" % token
+            content = json.dumps({
+                "user": user,
+                "action": "peer-info" if not request_forward else "request-forward"
+            })
             s.sendto(content.encode(), (server, port))
             if not r:
                 time.sleep(0.5)
@@ -360,7 +380,7 @@ def nat_tunnel_build(server, port, port_try_range, token):
         if s in w:
             try_times += 1
             l = int(32 * random.random() + 1)
-            content = gen_tran_id(l).encode()
+            content = utils.random_str(l).encode()
             s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset))
             if False:
                 port_offset = int(
@@ -379,7 +399,7 @@ def nat_tunnel_build(server, port, port_try_range, token):
             if not r:
                 t = random.random() / 2
                 time.sleep(t)
-        if time.time() - start_time > 60:
+        if time.time() - start_time > timeout:
             logging.error("Build udp tunnel timeout!(try times:%d)", try_times)
             break
     s.close()
@@ -402,10 +422,19 @@ def setup_p2p_vpn():
         logging.error("Missing token for p2p vpn!")
         sys.exit()
 
-    tun = (args.vip, args.vmask, 1400)
+    tun = (args.vip, args.vmask, args.mtu)
     s = nat_tunnel_build(
         args.server, args.port,
-        args.port_range, args.token)
+        args.port_range, args.token,
+        args.timeout)
+    if not s:
+        logging.error("NAT Tunnel build timeout!")
+        s = nat_tunnel_build(
+            args.server, args.port,
+            args.port_range, args.token,
+            args.timeout,
+            request_forward=True)
+
     VPN(False, tun, 0, s, args.show_status).run()
 
 
@@ -424,6 +453,7 @@ if __name__ == '__main__':
                 setup_p2p_vpn()
         except Exception as e:
             logging.error("VPN instance exit(%s)", str(e))
+            traceback.print_exc()
             pass
 
         if not args.run_as_service:
