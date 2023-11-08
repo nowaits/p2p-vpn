@@ -1,10 +1,12 @@
+import sys
 import socket
 import select
 import time
 import logging
-import sys
 import argparse
 import json
+
+assert sys.version_info >= (3, 6)
 
 LOG_LEVELS = (
     logging.NOTSET, logging.DEBUG,

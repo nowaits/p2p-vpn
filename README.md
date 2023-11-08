@@ -26,11 +26,21 @@
 - 以服务形式运行: `添加参数：--run-as-service`
 - 更多参考:`python vpn.py -h`
 
+### 打包
+
+- 使用pyinstaller打包
+    - 安装依赖:`pip install pyinstaller`
+    - 打包:`pyinstaller -F vpn.py`
+
 ### 其它
 
 - 查看出口NAT类型：`python libs/stun.py`
     - 已经内置了免费stun服务器列表
 - 删除tun网卡: `ip link del tap0`
+
+### TODO
+
+1. 创建windows服务
 
 ### DOC
 

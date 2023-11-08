@@ -1,0 +1,1 @@
+python %~dp0\vpn.py -s=www.botnn.com -t=test --vip=10.0.0.1 --verbose=INFO --run-as-service

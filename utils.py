@@ -7,6 +7,7 @@ import random
 def random_str(l):
     return ''.join(random.sample(string.ascii_letters + string.digits, l))
 
+
 def rate_format(rate):
     rate *= 1.0
 
@@ -37,7 +38,7 @@ def rate_format_str(rate):
 
 class Rate(object):
     def __init__(self):
-        self._time_last = time.time()
+        self._time_last = 0
         self._cur_pkts = 0
         self._cur_bytes = 0
         self._total_pkts = 0
@@ -45,9 +46,9 @@ class Rate(object):
         self._pps = 0
         self._bps = 0
 
-    def feed(self, len):
-        now = time.time()
-
+    def feed(self, now, len):
+        if self._time_last == 0:
+            self._time_last = now
         self._total_pkts += 1
         self._total_bytes += len
         if now < self._time_last + 1:
