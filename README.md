@@ -20,8 +20,19 @@
 
 - NAT穿越类型VPN，需要借助公网服务器转发对方出口地址
     - 公网服务器：`python server.py -p=<server port>`
-    - client A: `python vpn.py -s=<server ip> -p=<server port> -t=test --vip=10.0.0.1`
-    - client B: `python vpn.py -s=<server ip> -p=<server port> -t=test --vip=10.0.0.2`
+    - client A: `python vpn.py -s=<server ip> -p=<server port> --user=test --passwd=xxx --vip=10.0.0.1`
+    - client B: `python vpn.py -s=<server ip> -p=<server port> --user=test --passwd=xxx --vip=10.0.0.2`
+
+- 用户密码认证过程
+    ```
+    CLIENT A/B                                          SERVER
+    ----------                                          ------
+    user,ins_id,action                     --->       [record addr]
+                                           <---         challenge
+    user,ins_id,action,auth                --->      [check auth(A|B)]
+    [auth=HMAC(challenge,user+passwd)]
+                                           <---         peer_addr
+    ```
 
 - 以服务形式运行: `添加参数：--run-as-service`
 - 更多参考:`python vpn.py -h`

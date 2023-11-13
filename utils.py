@@ -2,10 +2,17 @@
 import time
 import string
 import random
+import hashlib
+import uuid
 
 
 def random_str(l):
     return ''.join(random.sample(string.ascii_letters + string.digits, l))
+
+
+def device_id():
+    id = str(uuid.getnode())
+    return hashlib.md5(id.encode()).hexdigest()[:16]
 
 
 def rate_format(rate):
@@ -36,9 +43,18 @@ def rate_format_str(rate):
     return s[:5] + t
 
 
+def format_time_diff(diff):
+    h = int(diff / 3600)
+    m = int((diff - h * 3600)/60)
+    s = int(diff - h * 3600 - m * 60)
+    return "%03d:%02d:%02d" % (h, m, s)
+
+
 class Rate(object):
     def __init__(self):
         self._time_last = 0
+        self._time_start = 0
+        self._time_now = 0
         self._cur_pkts = 0
         self._cur_bytes = 0
         self._total_pkts = 0
@@ -49,6 +65,9 @@ class Rate(object):
     def feed(self, now, len):
         if self._time_last == 0:
             self._time_last = now
+            self._time_start = now
+
+        self._time_now = now
         self._total_pkts += 1
         self._total_bytes += len
         if now < self._time_last + 1:
@@ -80,6 +99,17 @@ class Rate(object):
         return (
             rate_format_str(s[0]),
             rate_format_str(s[1])
+        )
+
+    def format_avg(self):
+        time_diff = self._time_now - self._time_start
+
+        if time_diff == 0:
+            return ("", "")
+
+        return (
+            rate_format_str(self._total_pkts/time_diff),
+            rate_format_str(self._total_bytes/time_diff)
         )
 
     def format_total(self):

@@ -4,7 +4,6 @@ import select
 from libs.tuntap import *
 import utils
 import time
-import signal
 import random
 # from scapy.all import *
 import threading
@@ -14,6 +13,7 @@ import argparse
 import logging
 import json
 import traceback
+import hmac
 
 assert sys.version_info >= (3, 6)
 
@@ -53,11 +53,14 @@ def parse_args():
         "--port", "-p", type=int, default=5100,
         help="server port, default 5100")
     parser.add_argument(
-        "--mtu", type=int, default=1400,
-        help="mtu, default 1400")
+        #
+        # 当前测试手机热点最大MTU为1341
+        #
+        "--mtu", type=int, default=1341,
+        help="mtu, default 1340")
     parser.add_argument(
-        "--timeout", type=int, default=60,
-        help="connect timeout, default 60s")
+        "--timeout", type=int, default=30,
+        help="connect timeout, default 30s")
     parser.add_argument(
         "--port-range", "-r", type=int, default=500,
         help="port range, default 500")
@@ -67,7 +70,8 @@ def parse_args():
     parser.add_argument(
         "--vmask", type=str, default="255.255.255.0",
         help="virtual ip mask, default 255.255.255.0")
-    parser.add_argument("--token", "-t", type=str, help="user token")
+    parser.add_argument("--user", type=str, help="user account")
+    parser.add_argument("--passwd", type=str, help="user passwd")
     parser.add_argument(
         "--run-as-service", action='store_true', help="run as vpn service")
     parser.add_argument(
@@ -81,10 +85,15 @@ class PacketHeader():
     data = 1
     control = 2
     heartbeat = 3
-    invalid_type = 4
-    invalid_len = 5
+    heartbeat_ack = 4
+    invalid_type = 5
+    invalid_len = 6
     format = "!BH"
     format_size = struct.calcsize(format)
+
+
+class AuthCheckFailed(Exception):
+    pass
 
 
 def vpn_packet_pack(p, t):
@@ -111,7 +120,6 @@ class VPN(object):
         self._sock = sock
         self._terminate = False
         self._show_status = show_status
-        self._tun.mtu = tun[2]
         self._tun_read_queue = queue.Queue()
         self._tun_write_queue = queue.Queue()
         self._rx_rate = utils.Rate()
@@ -128,6 +136,8 @@ class VPN(object):
         assert self._terminate
         self._tun.close()
         self._sock.close()
+        self._mock_sock[0].close()
+        self._mock_sock[1].close()
         for t in self._threads:
             t.join()
         logging.info("VPN closed!")
@@ -172,14 +182,16 @@ class VPN(object):
             time.sleep(1)
             r0 = self._rx_rate.format_status()
             r1 = self._tx_rate.format_status()
+            a0 = self._rx_rate.format_avg()
+            a1 = self._tx_rate.format_avg()
             t0 = self._rx_rate.format_total()
             t1 = self._tx_rate.format_total()
             print(
-                "Rate(%d) "
-                "RX-TX(PPS/BPS): %s/%s-%s/%s "
-                "Total(RX/TX): %s/%s" % (
-                    index,
-                    r0[0], r0[1], r1[0], r1[1],
+                "Rate(%s) "
+                "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
+                    utils.format_time_diff(index),
+                    r0[1], a0[1],
+                    r1[1], a1[1],
                     t0[1], t1[1]))
             index += 1
 
@@ -209,10 +221,17 @@ class VPN(object):
         ws = []
         heartbeat_seq_no = 0
         need_send_heart = False
+        need_send_heart_ack = False
         while not self._terminate:
-            r, w, _ = select.select(rs, ws, [], 2)
+            try:
+                r, w, _ = select.select(rs, ws, [], 5)
+            except KeyboardInterrupt:
+                self._terminate = True
+                logging.error("VPN proc exist!")
+                break
 
             ws = []
+            now = time.time()
 
             if not r and not w:
                 #
@@ -224,26 +243,35 @@ class VPN(object):
                 need_send_heart = True
                 ws.append(self._sock)
 
-                now = time.time()
                 if now - self._last_recv_data_time > 30:
                     logging.error("Heartbeat timeout!")
                     self._terminate = True
                 continue
 
             if self._sock in r:
-                p = self._sock.recv(2048)
+                try:
+                    p = self._sock.recv(2048)
+                except ConnectionRefusedError:
+                    self._terminate = True
+                    break
                 t, p = vpn_packet_unpack(p)
                 if t == PacketHeader.data:
-                    now = time.time()
                     self._tun_write_queue.put(p)
                     self._rx_rate.feed(now, len(p))
                     self._last_recv_data_time = now
                     need_send_heart = False
                 elif t == PacketHeader.heartbeat:
-                    now = time.time()
                     self._last_recv_data_time = now
                     need_send_heart = False
+                    need_send_heart_ack = True
+                    ws.append(self._sock)
                     # logging.info("Heartbeat recv:%s", str(p))
+                    pass
+                elif t == PacketHeader.heartbeat_ack:
+                    self._last_recv_data_time = now
+                    need_send_heart = False
+                    need_send_heart_ack = False
+                    # logging.info("Heartbeat ack:%s", str(p))
                     pass
                 elif t == PacketHeader.control:
                     logging.warning(
@@ -268,7 +296,7 @@ class VPN(object):
                     p = self._tun_read_queue.get()
                     self._sock.send(p)
                     w.remove(self._sock)
-                    self._tx_rate.feed(time.time(), len(p))
+                    self._tx_rate.feed(now, len(p))
 
             n = self._tun_read_queue.qsize()
             if n > 0:
@@ -276,19 +304,35 @@ class VPN(object):
                     p = self._tun_read_queue.get()
                     self._sock.send(p)
                     w.remove(self._sock)
-                    self._tx_rate.feed(time.time(), len(p))
+                    self._tx_rate.feed(now, len(p))
                     n -= 1
                 if n > 0:
                     ws.append(self._sock)
 
-            if need_send_heart and self._sock in w:
-                content = '%d:%f' % (heartbeat_seq_no, time.time())
-                d = vpn_packet_pack(
-                    content.encode(), PacketHeader.heartbeat)
-                self._sock.send(d)
-                need_send_heart = False
-                heartbeat_seq_no += 1
-                logging.debug("Send heartbeat")
+            if need_send_heart:
+                if self._sock in w:
+                    content = '%d:%f' % (heartbeat_seq_no, now)
+                    d = vpn_packet_pack(
+                        content.encode(), PacketHeader.heartbeat)
+                    self._sock.send(d)
+                    need_send_heart = False
+                    heartbeat_seq_no += 1
+                    w.remove(self._sock)
+                    logging.debug("Send heartbeat")
+                else:
+                    ws.append(self._sock)
+
+            if need_send_heart_ack:
+                if self._sock in w:
+                    content = '%d:%f' % (heartbeat_seq_no, now)
+                    d = vpn_packet_pack(
+                        content.encode(), PacketHeader.heartbeat_ack)
+                    self._sock.send(d)
+                    need_send_heart_ack = False
+                    w.remove(self._sock)
+                    logging.debug("Send heartbeat ack")
+                else:
+                    ws.append(self._sock)
 
             if not self._select_tun:
                 continue
@@ -307,25 +351,62 @@ class VPN(object):
         logging.info("VPN Server exit!")
 
 
-def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forward=False):
+def nat_tunnel_build(
+        instance_id, server, port, port_try_range,
+        user, passwd, timeout, request_forward=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setblocking(False)
 
     # 1. get peer addr
     peer_addr = None
+    start_time = time.time()
+    challenge = None
+    ws = [s]
+    connect_ready = False
+    if request_forward:
+        connect_ready = True
     while not peer_addr:
-        r, w, _ = select.select([s], [s], [], 1)
+        r, w, _ = select.select([s], ws, [], 0.1 if connect_ready else 10)
+        ws = []
+
         if s in r:
-            data, _ = s.recvfrom(2048)
+            data, addr = s.recvfrom(2048)
             try:
                 info = json.loads(data.decode())
             except Exception as e:
                 logging.error("Decode %s error(%s)", str(data), str(e))
                 continue
 
-            if type(info) != dict or "addr" not in info or "port" not in info:
+            if type(info) != dict:
                 logging.error("Resp:%s from server invalid!", str(info))
-                pass
+                continue
+
+            if "challenge" in info:
+                logging.debug(
+                    "Challenge update: %s -> %s",
+                    challenge, info["challenge"])
+                challenge = info["challenge"]
+                ws.append(s)
+                continue
+
+            logging.debug("Resp:%s from server", str(info))
+            if "auth-failed" in info:
+                s.close()
+                raise AuthCheckFailed("Passwd check failed!")
+
+            if not connect_ready and "ready" in info and info["ready"]:
+                connect_ready = True
+                continue
+
+            key_missing = False
+            for k in ["addr", "port"]:
+                if k not in info:
+                    key_missing = True
+                    logging.error("Resp:%s missing key:%s!", str(info), k)
+                    break
+
+            if key_missing:
+                continue
 
             peer_addr = (info["addr"], int(info["port"]))
             if not request_forward:
@@ -338,13 +419,29 @@ def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forwar
                 return s
 
         if s in w:
-            content = json.dumps({
+            content = {
                 "user": user,
-                "action": "peer-info" if not request_forward else "request-forward"
-            })
-            s.sendto(content.encode(), (server, port))
-            if not r:
-                time.sleep(0.5)
+                "instance_id": instance_id,
+                "action": "peer-info" if not request_forward else "request-forward",
+                "ready": connect_ready,
+            }
+
+            if challenge != None:
+                content["auth"] = hmac.new(
+                    challenge.encode(),
+                    (user+passwd).encode(),
+                    digestmod='md5'
+                ).hexdigest()[:16]
+
+            s.sendto(json.dumps(content).encode(), (server, port))
+
+        if request_forward and time.time() - start_time > timeout:
+            logging.error("Get peer info timeout(%ds)", timeout)
+            s.close()
+            return None
+
+        if not r and not w:
+            ws.append(s)
 
     local = s.getsockname()
     logging.info("Try to build UDP tunnel(%s:%d=>%s:%d)" % (
@@ -355,17 +452,20 @@ def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forwar
     sign = 1
     try_times = 0
     start_time = time.time()
+    ws = [s]
+    select_timeout = 0.1
     while True:
-        r, w, _ = select.select([s], [s], [], 1)
+        r, w, _ = select.select([s], ws, [], select_timeout)
+
+        ws = []
 
         if s in r:
             data, addr = s.recvfrom(2048)
-            if addr[0] != peer_addr[0]:
-                continue
-            s.connect(addr)
-            logging.info("Tunnel ok! peer: %s:%d try times:%d",
-                         addr[0], addr[1], try_times)
-            return s
+            if addr[0] == peer_addr[0]:
+                s.connect(addr)
+                logging.info("Tunnel ok! peer: %s:%d try times:%d",
+                             addr[0], addr[1], try_times)
+                return s
 
         if s in w:
             try_times += 1
@@ -378,9 +478,9 @@ def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forwar
                     random.random() - port_try_range/2)
             else:
                 port_offset += sign
-                if port_offset > port_try_range/2:
+                if port_offset > port_try_range/2 or peer_addr[1] + port_offset == 65536:
                     sign = -1
-                elif port_offset < -port_try_range/2:
+                elif port_offset < -port_try_range/2 or peer_addr[1] + port_offset == 1:
                     sign = 1
             logging.debug(
                 "try next port(%d): %s:%d", try_times,
@@ -388,7 +488,11 @@ def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forwar
 
             if not r:
                 t = random.random() / 10
-                time.sleep(t)
+                select_timeout = t
+
+        if not r and not w:
+            ws.append(s)
+
         if time.time() - start_time > timeout:
             logging.error("Build udp tunnel timeout!(try times:%d)", try_times)
             break
@@ -396,8 +500,9 @@ def nat_tunnel_build(server, port, port_try_range, user, timeout, request_forwar
     return None
 
 
-def setup_cs_vpn():
+def setup_cs_vpn(instance_id):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.setblocking(False)
     if args.client:
         s.connect((args.server, args.port))
@@ -444,28 +549,34 @@ def setup_cs_vpn():
     else:
         logging.info("client connect: %s:%d ok" %
                      (peer[0], peer[1]))
-    tun = (args.vip, args.vmask, 1400)
+    tun = (args.vip, args.vmask, args.mtu)
     with VPN(tun, s, args.show_status) as v:
         v.run()
 
 
-def setup_p2p_vpn():
-    if not args.token:
-        logging.error("Missing token for p2p vpn!")
+def setup_p2p_vpn(instance_id):
+    if not args.user or not args.passwd:
+        logging.error("Missing user or passwd for p2p vpn!")
         sys.exit()
 
     tun = (args.vip, args.vmask, args.mtu)
+    server = socket.gethostbyname(args.server)
     s = nat_tunnel_build(
-        args.server, args.port,
-        args.port_range, args.token,
+        instance_id,
+        server, args.port,
+        args.port_range, args.user, args.passwd,
         args.timeout)
     if not s:
         logging.error("NAT Tunnel build timeout!")
         s = nat_tunnel_build(
-            args.server, args.port,
-            args.port_range, args.token,
-            args.timeout,
+            instance_id,
+            server, args.port,
+            args.port_range, args.user, args.passwd,
+            min(args.timeout, 30),
             request_forward=True)
+        if not s:
+            logging.error("Forward Tunnel build timeout!")
+            return
 
     with VPN(tun, s, args.show_status) as v:
         v.run()
@@ -475,12 +586,20 @@ if __name__ == '__main__':
     args = parse_args()
     set_loggint_format(args.verbose)
 
+    instance_id = utils.device_id()
+
     while True:
         try:
             if args.cs_vpn:
-                setup_cs_vpn()
+                setup_cs_vpn(instance_id)
             else:
-                setup_p2p_vpn()
+                setup_p2p_vpn(instance_id)
+        except (socket.gaierror, OSError) as e:
+            logging.warning("VPN instance exit(%s)", str(e))
+            time.sleep(5)
+        except AuthCheckFailed as e:
+            logging.error("VPN instance exit(%s)", str(e))
+            break
         except Exception as e:
             logging.error("VPN instance exit(%s)", str(e))
             traceback.print_exc()
