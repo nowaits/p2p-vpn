@@ -1,3 +1,4 @@
+import os
 import sys
 import socket
 import select
@@ -17,6 +18,9 @@ import hmac
 
 assert sys.version_info >= (3, 6)
 
+SCRIPT = os.path.abspath(__file__)
+PWD = os.path.dirname(SCRIPT)
+
 LOG_LEVELS = (
     logging.NOTSET, logging.DEBUG,
     logging.INFO, logging.WARNING,
@@ -27,9 +31,15 @@ LOG_CHOICES = list(map(lambda x: logging.getLevelName(x), LOG_LEVELS))
 def set_loggint_format(level):
     debug_info = " %(filename)s %(funcName)s:%(lineno)d "
 
+    if args.logfile:
+        log_file = os.path.join(PWD, args.logfile)
+        log_file_fd = open(log_file, 'a')
+    else:
+        log_file_fd = sys.stdout
+
     logging.basicConfig(
         level=level,
-        stream=sys.stdout,
+        stream=log_file_fd,
         format='[%(asctime)s %(levelname)s' + debug_info + ']: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
@@ -74,6 +84,8 @@ def parse_args():
     parser.add_argument("--passwd", type=str, help="user passwd")
     parser.add_argument(
         "--run-as-service", action='store_true', help="run as vpn service")
+    parser.add_argument("--logfile", type=str, default=None,
+                        help="if set, then running log redirect to file")
     parser.add_argument(
         '--verbose', default=LOG_CHOICES[2],
         choices=LOG_CHOICES, help="log level default:%s" % (LOG_CHOICES[2]))
@@ -186,7 +198,7 @@ class VPN(object):
             a1 = self._tx_rate.format_avg()
             t0 = self._rx_rate.format_total()
             t1 = self._tx_rate.format_total()
-            print(
+            logging.info(
                 "Rate(%s) "
                 "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
                     utils.format_time_diff(index),

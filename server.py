@@ -1,3 +1,4 @@
+import os
 import sys
 import socket
 import select
@@ -8,6 +9,9 @@ import json
 import hashlib
 
 assert sys.version_info >= (3, 6)
+
+SCRIPT = os.path.abspath(__file__)
+PWD = os.path.dirname(SCRIPT)
 
 LOG_LEVELS = (
     logging.NOTSET, logging.DEBUG,
@@ -20,12 +24,20 @@ parser.add_argument("--port", "-p", type=int,
                     default=5100, help="server port, default 5100")
 parser.add_argument(
     '--verbose', "-v", default=LOG_CHOICES[2], choices=LOG_CHOICES, help="log level")
+parser.add_argument("--logfile", type=str, default=None,
+                    help="if set, then running log redirect to file")
 args = parser.parse_args()
 
 debug_info = " %(filename)s %(funcName)s:%(lineno)d "
+
+if args.logfile:
+    log_file = os.path.join(PWD, args.logfile)
+    log_file_fd = open(log_file, 'a')
+else:
+    log_file_fd = sys.stdout
 logging.basicConfig(
     level=args.verbose,
-    stream=sys.stdout,
+    stream=log_file_fd,
     format='[%(asctime)s %(levelname)s' + debug_info + ']: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
