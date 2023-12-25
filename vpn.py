@@ -460,8 +460,10 @@ def nat_tunnel_build(
         local[0], local[1], peer_addr[0], peer_addr[1]))
 
     # 2. build tunnel
-    port_offset = 0
-    sign = 1
+    port_offset0 = 0
+    port_offset1 = 0
+    sign0 = 1
+    sign1 = -1
     try_times = 0
     start_time = time.time()
     ws = [s]
@@ -483,20 +485,31 @@ def nat_tunnel_build(
             try_times += 1
             l = int(32 * random.random() + 1)
             content = utils.random_str(l).encode()
-            s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset))
+            s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset0))
+            s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset1))
             if False:
-                port_offset = int(
+                port_offset0 = int(
+                    port_try_range *
+                    random.random() - port_try_range/2)
+                port_offset1 = int(
                     port_try_range *
                     random.random() - port_try_range/2)
             else:
-                port_offset += sign
-                if port_offset > port_try_range/2 or peer_addr[1] + port_offset == 65536:
-                    sign = -1
-                elif port_offset < -port_try_range/2 or peer_addr[1] + port_offset == 1:
-                    sign = 1
+                port_offset0 += sign0
+                port_offset1 += sign1
+                if port_offset0 > port_try_range/2 or peer_addr[1] + port_offset0 == 65536:
+                    sign0 = -1
+                elif port_offset0 < -port_try_range/2 or peer_addr[1] + port_offset0 == 1:
+                    sign0 = 1
+                if port_offset1 > port_try_range/2 or peer_addr[1] + port_offset1 == 65536:
+                    sign0 = -1
+                elif port_offset1 < -port_try_range/2 or peer_addr[1] + port_offset1 == 1:
+                    sign0 = 1
             logging.debug(
-                "try next port(%d): %s:%d", try_times,
-                peer_addr[0], peer_addr[1] + port_offset)
+                "try next port(%d): %s:(%d,%d)", try_times,
+                peer_addr[0],
+                peer_addr[1] + port_offset0,
+                peer_addr[1] + port_offset1)
 
             if not r:
                 t = random.random() / 10
