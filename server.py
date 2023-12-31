@@ -28,7 +28,7 @@ parser.add_argument("--logfile", type=str, default=None,
                     help="if set, then running log redirect to file")
 args = parser.parse_args()
 
-debug_info = " %(filename)s %(funcName)s:%(lineno)d "
+debug_info = " %(filename)s:%(lineno)d %(funcName)s"
 
 if args.logfile:
     log_file = os.path.join(PWD, args.logfile)

@@ -29,11 +29,11 @@ LOG_CHOICES = list(map(lambda x: logging.getLevelName(x), LOG_LEVELS))
 
 
 def set_loggint_format(level):
-    debug_info = " %(filename)s %(funcName)s:%(lineno)d "
+    debug_info = " %(filename)s:%(lineno)d %(funcName)s"
 
     if args.logfile:
         log_file = os.path.join(PWD, args.logfile)
-        log_file_fd = open(log_file, 'a')
+        log_file_fd = open(log_file, 'w')
     else:
         log_file_fd = sys.stdout
 
@@ -626,8 +626,7 @@ if __name__ == '__main__':
             logging.error("VPN instance exit(%s)", str(e))
             break
         except Exception as e:
-            logging.error("VPN instance exit(%s)", str(e))
-            traceback.print_exc()
+            logging.error("VPN instance exit\n%s", traceback.format_exc())
             pass
 
         if not args.run_as_service:
