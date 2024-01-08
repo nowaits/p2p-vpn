@@ -115,8 +115,6 @@ while True:
     user = info["user"]
     instance_id = info["instance_id"]
 
-    now = time.time()
-
     logging.debug("Recv client: %s:%d", addr[0], addr[1])
     # 3. check user is ready
     if not info["ready"]:

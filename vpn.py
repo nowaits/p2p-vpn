@@ -67,13 +67,13 @@ def parse_args():
         # 当前测试手机热点最大MTU为1341
         #
         "--mtu", type=int, default=1341,
-        help="mtu, default 1340")
+        help="mtu, default 1341")
     parser.add_argument(
         "--timeout", type=int, default=30,
         help="connect timeout, default 30s")
     parser.add_argument(
-        "--port-range", "-r", type=int, default=500,
-        help="port range, default 500")
+        "--port-range", "-r", type=int, default=1000,
+        help="port range, default 1000")
     parser.add_argument(
         "--vip", type=str, default="10.0.0.1",
         help="virtual ip, default 10.0.0.1")
@@ -192,8 +192,8 @@ class VPN(object):
         index = 0
         while not self._terminate:
             time.sleep(1)
-            r0 = self._rx_rate.format_status()
-            r1 = self._tx_rate.format_status()
+            r0 = self._rx_rate.format_now()
+            r1 = self._tx_rate.format_now()
             a0 = self._rx_rate.format_avg()
             a1 = self._tx_rate.format_avg()
             t0 = self._rx_rate.format_total()
@@ -502,9 +502,9 @@ def nat_tunnel_build(
                 elif port_offset0 < -port_try_range/2 or peer_addr[1] + port_offset0 == 1:
                     sign0 = 1
                 if port_offset1 > port_try_range/2 or peer_addr[1] + port_offset1 == 65536:
-                    sign0 = -1
+                    sign1 = -1
                 elif port_offset1 < -port_try_range/2 or peer_addr[1] + port_offset1 == 1:
-                    sign0 = 1
+                    sign1 = 1
             logging.debug(
                 "try next port(%d): %s:(%d,%d)", try_times,
                 peer_addr[0],

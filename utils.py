@@ -4,6 +4,7 @@ import string
 import random
 import hashlib
 import uuid
+import socket
 
 
 def random_str(l):
@@ -50,6 +51,28 @@ def format_time_diff(diff):
     return "%03d:%02d:%02d" % (h, m, s)
 
 
+def set_keep_alive(sock, after_idle=5, interval=10, max_fails=5):
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)
+
+    if hasattr(socket, "TCP_KEEPIDLE") and \
+            hasattr(socket, "TCP_KEEPINTVL") and \
+            hasattr(socket, "TCP_KEEPCNT"):
+        sock.setsockopt(
+            socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, after_idle)
+        sock.setsockopt(
+            socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval)
+        sock.setsockopt(
+            socket.IPPROTO_TCP, socket.TCP_KEEPCNT, max_fails)
+        return True
+    elif hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        sock.ioctl(
+            socket.SIO_KEEPALIVE_VALS,
+            (1, after_idle * 1000, interval * 1000))
+        return True
+    else:
+        return False
+
+
 class Rate(object):
     def __init__(self):
         self._time_last = 0
@@ -62,16 +85,14 @@ class Rate(object):
         self._pps = 0
         self._bps = 0
 
-    def feed(self, now, len):
+    def feed(self, now, len, num=1):
         if self._time_last == 0:
             self._time_last = now
             self._time_start = now
 
         self._time_now = now
-        self._total_pkts += 1
-        self._total_bytes += len
         if now < self._time_last + 1:
-            self._cur_pkts += 1
+            self._cur_pkts += num
             self._cur_bytes += len
             return False
         else:
@@ -80,13 +101,15 @@ class Rate(object):
                 self._cur_bytes = 0
             self._pps = self._cur_pkts
             self._bps = self._cur_bytes
-            self._cur_pkts = 1
+            self._total_pkts += self._cur_pkts
+            self._total_bytes += self._cur_bytes
+            self._cur_pkts = num
             self._cur_bytes = len
             self._time_last = now
 
             return True
 
-    def status(self):
+    def now(self):
         now = time.time()
         if now > self._time_last + 1:
             self._pps = 0
@@ -94,26 +117,34 @@ class Rate(object):
 
         return (self._pps, self._bps)
 
-    def format_status(self):
-        s = self.status()
+    def avg(self):
+        time_diff = self._time_now - self._time_start
+
+        if time_diff == 0:
+            return (0, 0)
+
+        return (self._total_pkts/time_diff, self._total_bytes/time_diff)
+
+    def total(self):
+        return (self._total_pkts, self._total_bytes)
+
+    def format_now(self):
+        s = self.now()
         return (
             rate_format_str(s[0]),
             rate_format_str(s[1])
         )
 
     def format_avg(self):
-        time_diff = self._time_now - self._time_start
-
-        if time_diff == 0:
-            return ("", "")
-
+        s = self.avg()
         return (
-            rate_format_str(self._total_pkts/time_diff),
-            rate_format_str(self._total_bytes/time_diff)
+            rate_format_str(s[0]),
+            rate_format_str(s[1])
         )
 
     def format_total(self):
+        s = self.total()
         return (
-            rate_format_str(self._total_pkts),
-            rate_format_str(self._total_bytes)
+            rate_format_str(s[0]),
+            rate_format_str(s[1])
         )

@@ -3,8 +3,17 @@ import socket
 import select
 import threading
 import logging
-from collections import deque
+import utils
 import argparse
+import os
+import time
+import traceback
+import struct
+import json
+from collections import deque
+
+SCRIPT = os.path.abspath(__file__)
+PWD = os.path.dirname(SCRIPT)
 
 
 assert sys.version_info >= (3, 6)
@@ -17,22 +26,53 @@ LOG_CHOICES = list(map(lambda x: logging.getLevelName(x), LOG_LEVELS))
 
 
 def set_loggint_format(level):
-    debug_info = " %(filename)s %(funcName)s:%(lineno)d "
+    debug_info = " %(filename)s:%(lineno)d %(funcName)s"
+
+    if args.logfile:
+        log_file = os.path.join(PWD, args.logfile)
+        log_file_fd = open(log_file, 'w')
+    else:
+        log_file_fd = sys.stdout
 
     logging.basicConfig(
         level=level,
-        stream=sys.stdout,
+        stream=log_file_fd,
         format='[%(asctime)s %(levelname)s' + debug_info + ']: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
 
 def parse_args():
+    def parse_maps(str):
+        m = []
+        protos = {"tcp": socket.SOCK_STREAM, "udp": socket.SOCK_DGRAM}
+        for a in str.split(","):
+            p0, p1, p2 = a.split(":")
+            m.append((protos[p0], int(p1), int(p2)))
+        return m
+
     parser = argparse.ArgumentParser(description="port forward")
 
-    parser.add_argument("--rip", type=str, required=True, help="remote ip")
-    parser.add_argument("--rport", type=int, required=True, help="remote port")
-    parser.add_argument("--lport", type=int, required=True, help="local port")
+    parser.add_argument(
+        "--is-tunnel-server", action='store_true', help="is tunnel server, default: false")
+    parser.add_argument(
+        "--show-status", action='store_true', help="show status")
+    parser.add_argument(
+        "--ip", type=str, default="0.0.0.0", help="agent/server IP")
+    parser.add_argument(
+        "--status-period", type=int, default=300, help="status-period, default:5min")
+    parser.add_argument(
+        "--port", type=int, default=5100,
+        help="agent/server, default 5100")
+    parser.add_argument(
+        "--local-port-map", type=parse_maps, default=[],
+        help="local port maps: <tcp/udp>:<local-port0>:<remote-port0>,<tcp/udp>:<local-port1>:<remote-port1>")
+    parser.add_argument(
+        "--remote-port-map", type=parse_maps, default=[],
+        help="remote port maps: <tcp/udp>:<local-port0>:<remote-port0>,<tcp/udp>:<local-port1>:<remote-port1>")
+    parser.add_argument(
+        "--logfile", type=str, default=None,
+        help="if set, then running log redirect to file")
     parser.add_argument(
         '--verbose', default=LOG_CHOICES[2],
         choices=LOG_CHOICES, help="log level default:%s" % (LOG_CHOICES[2]))
@@ -40,111 +80,721 @@ def parse_args():
     return parser.parse_args()
 
 
-class PortForward(object):
-    def __init__(self, is_tcp, local_addr, remote_addr):
-        self._sock_type = socket.SOCK_STREAM if is_tcp else socket.SOCK_DGRAM
-        self._sock_local = socket.socket(socket.AF_INET, self._sock_type)
-        self._sock_local.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock_local.bind(local_addr)
-        self._sock_local.listen(10)
-        self._local_addr = local_addr
-        self._remote_addr = remote_addr
-        self._threads = []
+class UserAbort(Exception):
+    pass
+
+
+class TunnelOffline(Exception):
+    pass
+
+
+class STATS():
+    tx_cache_idx = 0
+    rx_cache_idx = tx_cache_idx + 1
+    client_to_tunnel_idx = rx_cache_idx + 1
+    tunnel_to_target_idx = client_to_tunnel_idx + 1
+    stats_max_idx = tunnel_to_target_idx + 1
+    MTU = 2048
+    restart_times = 0
+    workers = {}
+
+    # 请求限速功能
+    client_open_rate = 20  # 每秒最多打开20次
+    # <IP, [last time]>
+    cient_stats = {}
+
+    def status(index, alive):
+
+        if not STATS.workers:
+            return
+
+        # [rx bps, tx bps]
+        rate_now = [0, 0]
+        rate_avg = [0, 0]
+        rate_total = [0, 0]
+
+        tx_cache = 0
+        rx_cache = 0
+        client_to_tunnel = 0
+        tunnel_to_target = 0
+
+        for _, w in STATS.workers.items():
+            r, t = w.rate()
+            s = w.stats()
+
+            tx_cache += s[STATS.tx_cache_idx]
+            rx_cache += s[STATS.rx_cache_idx]
+            client_to_tunnel += s[STATS.client_to_tunnel_idx]
+            tunnel_to_target += s[STATS.tunnel_to_target_idx]
+
+            rate_now[0] += r.now()[1]
+            rate_now[1] += t.now()[1]
+
+            rate_avg[0] += r.avg()[1]
+            rate_avg[1] += t.avg()[1]
+
+            rate_total[0] += r.total()[1]
+            rate_total[1] += t.total()[1]
+
+        msg1 = \
+            "Rate(%s) Worker(%d): %d CLIENTS: %d/%d " \
+            "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
+                utils.format_time_diff(alive),
+                STATS.restart_times,
+                len(STATS.workers.items()),
+                client_to_tunnel, tunnel_to_target,
+
+                utils.rate_format_str(rate_now[0]),
+                utils.rate_format_str(rate_avg[0]),
+
+                utils.rate_format_str(rate_now[1]),
+                utils.rate_format_str(rate_avg[1]),
+
+                utils.rate_format_str(rate_total[0]),
+                utils.rate_format_str(rate_total[1]))
+
+        if tx_cache != 0 or rx_cache != 0:
+            msg2 = " Cache: %d/%d" % (tx_cache, rx_cache)
+        else:
+            msg2 = ""
+
+        logging.info("%s%s", msg1, msg2)
+
+
+class PacketHeader():
+    data = 1
+    session_create = 2
+    session_destroy = 3
+    port_map = 4
+    # type + proto + client port + target port + len(data len)
+    format = "!BBHHH"
+    format_size = struct.calcsize(format)
+
+
+def tunnel_packet_pack(p, t, proto, lport, rport):
+    return struct.pack(
+        PacketHeader.format, t, proto, lport, rport, len(p)
+    ) + p
+
+
+class PortForwardWorker(object):
+    def __init__(self, tunnel_sock):
+        self._tunnel_sock = tunnel_sock
+        self._id = tunnel_sock.fileno()
+        self._port_maps = {}
+        self._rx_rate = utils.Rate()
+        self._tx_rate = utils.Rate()
         self._terminate = False
+        # <fid, [tx cache, rx cache，client_idx, target_idx]>
+        self._status = STATS.stats_max_idx * [0]
+
+        self._rs = [self._tunnel_sock]
+        self._ws = []
+
+        STATS.workers[self._id] = self
+
+    def setup_map_sock(self, port_maps_conf):
+        added_port_map = []
+
+        for p in port_maps_conf:
+            assert p[0] == socket.SOCK_STREAM
+            try:
+                s = socket.socket(socket.AF_INET, p[0])
+                s.setsockopt(socket.SOL_SOCKET,
+                             socket.SO_REUSEADDR, 1)
+                s.setblocking(False)
+                s.bind(("0.0.0.0", p[1]))
+                s.listen(10)
+                added_port_map.append(s)
+            except Exception:
+                emsg = "Port Forward instance exit\n%s" % (
+                    traceback.format_exc())
+                logging.error("%s", emsg)
+
+                # close listen socket
+                for s in added_port_map:
+                    del self._port_maps[s.fileno()]
+                    s.close()
+
+                return False
+            self._port_maps[s.fileno()] = [s, p]
+
+        # add rs array
+        for s in added_port_map:
+            self._rs.append(s)
+
+        return True
+
+    def rate(self):
+        return (self._rx_rate, self._tx_rate)
+
+    def stats(self):
+        return self._status
+
+    def terminate(self):
+        self._terminate = True
+
+    def terminate_with_except(self, e):
+        self._terminate = True
+        del STATS.workers[self._id]
+        for _, m in self._port_maps.items():
+            m[0].close()
+        self._tunnel_sock.close()
+        raise e
+
+    def set_pending_write(self, s):
+        if s in self._ws:
+            return
+        self._ws.append(s)
+
+    def unset_pending_write(self, s):
+        if s not in self._ws:
+            return
+        self._ws.remove(s)
+
+    def flush_tx(self, q, s):
+        _pkts = 0
+        _bytes = 0
+        while q:
+            p = q.popleft()
+            try:
+                a = s.send(p)
+                _bytes += a
+                if a != len(p):
+                    p = p[a:]
+                    q.insert(0, p)
+                    break
+            except (ConnectionResetError, BlockingIOError):
+                q.insert(0, p)
+                break
+            _pkts += 1
+        return (_pkts, _bytes)
+
+    def main_proc(self):
+        self._tunnel_sock.setblocking(False)
+
+        self._last_recv_data_time = time.time()
+
+        data_buffer = bytes()
+
+        clients = {}
+        clients_fds = {}
+
+        tunnel_tx_queue = deque()
+
+        stats_last_update_time = time.time()
+
+        def close_client(s):
+            s_fid = s.fileno()
+            info = clients_fds[s_fid]
+            self._rs.remove(s)
+            self.unset_pending_write(s)
+
+            addr = info[6]
+
+            self._status[STATS.rx_cache_idx] -= len(info[1])
+
+            self._status[info[5]] -= 1
+            logging.info(
+                "Forward %s session %s %s:%d => %s:%d stop!",
+                "client -> tunnel" if info[5] == STATS.client_to_tunnel_idx else "tunnel -> target",
+                "tcp" if info[2] == socket.SOCK_STREAM else "udp",
+                addr[0], addr[1], addr[2], addr[3])
+
+            k = "%d-%d-%d" % (info[2], info[3], info[4])
+            s.close()
+            # client info
+            del clients[k]
+            del clients_fds[s_fid]
+
+        while not self._terminate:
+            try:
+                r, w, _ = select.select(self._rs, self._ws, [], 1)
+            except KeyboardInterrupt:
+                self._terminate = True
+                logging.error("Forward Worker proc exist!")
+                break
+
+            self._ws = []
+            now = time.time()
+
+            for sock in r:
+                self._last_recv_data_time = now
+                fid = sock.fileno()
+                assert fid != -1
+
+                if sock == self._tunnel_sock:
+                    try:
+                        data = sock.recv(STATS.MTU)
+                    except ConnectionResetError:
+                        self.terminate_with_except(
+                            TunnelOffline("tunnel offline"))
+                    except TimeoutError:
+                        self.terminate_with_except(
+                            TunnelOffline("tunnel timeout"))
+
+                    if not data:
+                        self._terminate = True
+                        break
+
+                    data_buffer += data
+                    while len(data_buffer) >= PacketHeader.format_size:
+                        t, stype, client_port, target_port, l = struct.unpack_from(
+                            PacketHeader.format, data_buffer)
+                        if PacketHeader.format_size + l > len(data_buffer):
+                            # logging.debug(
+                            #     "need for data!(%d/%d)",
+                            #     len(data_buffer), PacketHeader.format_size + l)
+                            break
+                        else:
+                            p = data_buffer[PacketHeader.format_size:PacketHeader.format_size+l]
+                            data_buffer = data_buffer[PacketHeader.format_size+l:]
+
+                        if t == PacketHeader.data:
+                            k = "%d-%d-%d" % (stype, client_port, target_port)
+                            if k not in clients:
+                                logging.debug(
+                                    "No forward session %s %d => %d! %d/%d",
+                                    "tcp" if stype else "udp",
+                                    client_port, target_port, l, len(data_buffer))
+                                continue
+
+                            s = clients[k][0]
+                            info = clients_fds[s.fileno()]
+                            tx_queue = info[1]
+                            tx_queue.append(p)
+
+                            self._status[STATS.rx_cache_idx] += 1
+                            try:
+                                _pkts, _bytes = self.flush_tx(tx_queue, s)
+                            except BrokenPipeError:
+                                # 对端已经关闭
+                                close_client(s)
+
+                                # 避免后续发送轮询失败
+                                if s in w:
+                                    w.remove(s)
+                                continue
+                            self._status[STATS.rx_cache_idx] -= _pkts
+
+                            if tx_queue:
+                                self.set_pending_write(s)
+
+                            self._rx_rate.feed(now, len(p))
+                            if self._status[STATS.rx_cache_idx] >= 512:
+                                # 避免发送累积过多处理不及时，导致整体性能低
+                                break
+                        elif t == PacketHeader.session_create:
+                            k = "%d-%d-%d" % (stype, client_port, target_port)
+                            if k in clients:
+                                continue
+
+                            s = socket.socket(socket.AF_INET, stype)
+                            s.setsockopt(socket.SOL_SOCKET,
+                                         socket.SO_REUSEADDR, 1)
+                            try:
+                                s.connect(("127.0.0.1", target_port))
+                            except:
+                                logging.info(
+                                    "Connect target port:%d faild\n%s",
+                                    target_port, traceback.format_exc())
+                                s.close()
+                                continue
+                            s.setblocking(False)
+                            clients[k] = (
+                                s, stype, client_port, target_port)
+                            assert s.fileno() not in clients
+
+                            la = s.getsockname()
+                            ra = s.getpeername()
+
+                            tx_queue = deque()
+                            clients_fds[s.fileno()] = (
+                                s, tx_queue, stype,
+                                client_port, target_port, STATS.tunnel_to_target_idx,
+                                (la[0], la[1], ra[0], ra[1]))
+
+                            #
+                            # 插入位置前于tunnel_sock，避免轮询时，tunnel_sock提前关闭client
+                            #
+                            self._rs.insert(0, s)
+
+                            self._status[STATS.tunnel_to_target_idx] += 1
+                            logging.info(
+                                "Forward tunnel -> target session %s %s:%d => %s:%d start!",
+                                "tcp" if stype == socket.SOCK_STREAM else "udp",
+                                la[0], la[1], ra[0], ra[1])
+                        elif t == PacketHeader.session_destroy:
+                            k = "%d-%d-%d" % (stype, client_port, target_port)
+                            if k in clients:
+                                s = clients[k][0]
+                                close_client(s)
+                                # 避免后续发送轮询失败
+                                if s in w:
+                                    w.remove(s)
+                            else:
+                                logging.info("unknow destroy")
+                        elif t == PacketHeader.port_map:
+                            try:
+                                info = json.loads(p.decode())
+                            except Exception as e:
+                                logging.error(
+                                    "Recv invalid port map conf: (%s)", str(p))
+                                continue
+
+                            if not self.setup_map_sock(info):
+                                self.terminate()
+                                logging.error(
+                                    "Setup Recv conf: (%s) failded", str(p))
+                        else:
+                            self.terminate_with_except(
+                                Exception("Unknow packet type:%d!", t))
+                elif fid in self._port_maps:
+                    listen_port_info = self._port_maps[fid][1]
+                    s, ra = sock.accept()
+                    s.setblocking(False)
+                    la = s.getsockname()
+                    assert la[1] == listen_port_info[1]
+
+                    # 请求限速功能
+                    if ra[0] not in STATS.cient_stats:
+                        STATS.cient_stats[ra[0]] = [now]
+                    else:
+                        STATS.client_rate = STATS.cient_stats[ra[0]]
+                        if now - STATS.client_rate[0] < 1 / STATS.client_open_rate:
+                            s.close()
+                            logging.warning(
+                                "Forward client -> tunnel session %s %s:%d => %s:%d to fast!",
+                                "tcp" if listen_port_info[0] == socket.SOCK_STREAM else "udp",
+                                la[0], la[1], ra[0], ra[1])
+                            continue
+                        else:
+                            STATS.client_rate[0] = now
+
+                    client_port = ra[1]
+                    k = "%d-%d-%d" % (
+                        listen_port_info[0], client_port, listen_port_info[2])
+                    tx_queue = deque()
+                    clients[k] = (
+                        s, listen_port_info[0], client_port, listen_port_info[2])
+                    clients_fds[s.fileno()] = (
+                        s, tx_queue, listen_port_info[0],
+                        client_port, listen_port_info[2], STATS.client_to_tunnel_idx,
+                        (la[0], la[1], ra[0], ra[1]))
+
+                    #
+                    # 插入位置前于tunnel_sock，避免轮询时，tunnel_sock提前关闭client
+                    #
+                    self._rs.insert(0, s)
+
+                    self._status[STATS.client_to_tunnel_idx] += 1
+                    p = tunnel_packet_pack(
+                        'x'.encode(), PacketHeader.session_create,
+                        listen_port_info[0], client_port, listen_port_info[2])
+                    tunnel_tx_queue.append(p)
+                    self.set_pending_write(self._tunnel_sock)
+
+                    logging.info(
+                        "Forward client -> tunnel session %s %s:%d => %s:%d start!",
+                        "tcp" if listen_port_info[0] == socket.SOCK_STREAM else "udp",
+                        la[0], la[1], ra[0], ra[1])
+                elif fid in clients_fds:
+                    if len(tunnel_tx_queue) >= 512:
+                        # 避免发送累积过多处理不及时，导致整体性能低
+                        continue
+
+                    info = clients_fds[fid]
+                    try:
+                        data = sock.recv(STATS.MTU)
+                    except (TimeoutError, ConnectionResetError):
+                        logging.info(
+                            "Client\n%s", traceback.format_exc())
+                        data = None
+
+                    if not data:
+                        p = tunnel_packet_pack(
+                            'x'.encode(), PacketHeader.session_destroy,
+                            info[2], info[3], info[4])
+                        tunnel_tx_queue.append(p)
+
+                        close_client(sock)
+
+                        # 避免后续发送轮询失败
+                        if sock in w:
+                            w.remove(sock)
+                    else:
+                        p = tunnel_packet_pack(
+                            data, PacketHeader.data,
+                            info[2], info[3], info[4])
+                        tunnel_tx_queue.append(p)
+                        _pkts, _bytes = self.flush_tx(
+                            tunnel_tx_queue, self._tunnel_sock)
+                        self._tx_rate.feed(now, _bytes, _pkts)
+                    self.set_pending_write(self._tunnel_sock)
+                else:
+                    self.terminate_with_except(
+                        Exception("Unknow RX socket!", sock))
+
+            for sock in list(w):
+                fid = sock.fileno()
+                assert fid != -1
+
+                if sock == self._tunnel_sock:
+                    _pkts, _bytes = self.flush_tx(tunnel_tx_queue, sock)
+                    self._tx_rate.feed(now, _bytes, _pkts)
+
+                    if _pkts:
+                        logging.debug(
+                            "Tunnel TX pkts:%d bytes:%d cache num:%d",
+                            _pkts, _bytes, len(tunnel_tx_queue))
+
+                    if tunnel_tx_queue:
+                        self.set_pending_write(sock)
+                elif fid in clients_fds:
+                    info = clients_fds[fid]
+                    tx_queue = info[1]
+                    _pkts, _bytes = self.flush_tx(tx_queue, sock)
+                    self._status[STATS.rx_cache_idx] -= _pkts
+                    if _pkts:
+                        logging.debug(
+                            "TX client pkts:%d bytes:%d tx cache num:%d",
+                            _pkts, _bytes, len(tx_queue))
+                    if tx_queue:
+                        self.set_pending_write(sock)
+                else:
+                    self.terminate_with_except(
+                        Exception("Unknow TX socket!", sock))
+
+            # 每隔1s更新一次计数
+            if now - stats_last_update_time > 1:
+                self._status[STATS.tx_cache_idx] = len(tunnel_tx_queue)
+                stats_last_update_time = now
+
+            if tunnel_tx_queue:
+                self.set_pending_write(self._tunnel_sock)
+                pass
+
+            if self._status[STATS.rx_cache_idx] > 0:
+                for k, v in clients_fds.items():
+                    tx_queue = v[1]
+                    if tx_queue:
+                        self.set_pending_write(v[0])
+
+        del STATS.workers[self._id]
+        self._tunnel_sock.close()
+        for _, m in self._port_maps.items():
+            m[0].close()
+        logging.info("Forward Worker exit!")
+
+
+class PortForwardBase(object):
+    def __init__(self, port_map_conf,
+                 show_status=False, status_period=0):
+        '''
+        port-map: 
+            (tcp/udp, local port, remote port)
+        port_map_conf: 
+            [
+                <local map conf>[port-map],
+                <remote map conf>[port-map],
+            ]
+        '''
+        self._threads = []
+        self._port_map_conf = port_map_conf
+        self._terminate = False
+        self._show_status = show_status
+        self._status_period = status_period
 
     def __enter__(self):
-        logging.info(
-            "forward service start(%s:%d=>%s:%d)!",
-            self._local_addr[0], self._local_addr[1],
-            self._remote_addr[0], self._remote_addr[1])
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        assert self._terminate
-        self._sock_local.close()
+        assert self._sock.fileno() == -1
         for t in self._threads:
             t.join()
-        logging.info("PortForward closed!")
-        pass
+        assert not STATS.workers
+        logging.info("Port Forward closed!")
+
+    def _start_thread(self, func, param):
+        t = threading.Thread(target=func, args=param)
+        t.daemon = True
+        t.start()
+        self._threads.append(t)
+        return t
+
+
+class PortForwardServer(PortForwardBase):
+    def __init__(
+            self, tunnel_addr, port_map_conf,
+            show_status=False, status_period=0):
+        PortForwardBase.__init__(
+            self, port_map_conf, show_status, status_period)
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(tunnel_addr)
+        self._sock.listen(10)
 
     def run(self):
+        rs = [self._sock]
+        ws = []
+        stats_index = 0
+        start = time.time()
+        workers = []
         while not self._terminate:
             try:
-                (sock1, client_addr) = self._sock_local.accept()
-            except (KeyboardInterrupt, Exception):
+                r, w, _ = select.select(rs, ws, [], self._status_period)
+
+                now = time.time()
+                if self._sock in r:
+                    tunnel_client, ra = self._sock.accept()
+                    # set tcp keepalive
+                    utils.set_keep_alive(tunnel_client)
+                    la = tunnel_client.getsockname()
+                    logging.info(
+                        "Server Forward session: %s:%d => %s:%d opened!",
+                        la[0], la[1], ra[0], ra[1])
+
+                    try:
+                        worker = PortForwardWorker(tunnel_client)
+                        if not worker.setup_map_sock(self._port_map_conf[0]):
+                            tunnel_client.close()
+                            continue
+
+                        if self._port_map_conf[1]:
+                            # send request port map config
+                            content = json.dumps(
+                                self._port_map_conf[1]).encode()
+                            d = tunnel_packet_pack(
+                                content, PacketHeader.port_map, 0, 0, 0)
+                            n = tunnel_client.send(d)
+                            assert n == len(d)
+
+                        workers.append(worker)
+                        self._start_thread(worker.main_proc, ())
+                    except:
+                        tunnel_client.close()
+                        logging.error("Port Forward instance exit\n%s",
+                                      traceback.format_exc())
+                if not r and not w and self._show_status:
+                    STATS.status(stats_index, now - start)
+                    stats_index += 1
+            except KeyboardInterrupt:
                 self._terminate = True
-                logging.debug('Stop port forward service.')
-                break
+                for w in workers:
+                    w.terminate()
+                self._sock.close()
+                raise UserAbort()
 
-            sock2 = socket.socket(socket.AF_INET, self._sock_type)
-            t = threading.Thread(
-                target=self.forward_request,
-                args=(sock1, sock2))
-            t.daemon = True
-            t.start()
-            self._threads.append(t)
 
-    def forward_request(self, sock1, sock2):
-        t = threading.current_thread()
+class PortForwardClient(PortForwardBase):
+    def __init__(
+            self, tunnel_addr, port_map_conf,
+            show_status=False, status_period=0):
+        PortForwardBase.__init__(
+            self, port_map_conf, show_status, status_period)
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.connect(tunnel_addr)
+
+    def _status(self):
+        index = 0
+        start = time.time()
+        last_time = start
+        while not self._terminate:
+            time.sleep(1)
+            now = time.time()
+            if now - last_time < self._status_period:
+                continue
+
+            last_time = now
+            STATS.status(index, now - start)
+            index += 1
+
+        logging.info("status thread exit!")
+
+    def run(self):
+        worker = None
         try:
-            sock2.connect(self._remote_addr)
-        except Exception:
-            sock2.close()
-            logging.error('Unable to connect to the remote server.')
-            self._threads.remove(t)
-            return
+            # set tcp keepalive
+            utils.set_keep_alive(self._sock)
+            la = self._sock.getsockname()
+            ra = self._sock.getpeername()
+            logging.info(
+                "Client Forward session: %s:%d => %s:%d opened!",
+                la[0], la[1], ra[0], ra[1])
 
-        try:
-            self.forward_socket(sock1, sock2)
-        except BrokenPipeError:
-            pass
-        except Exception as e:
-            logging.error('Exit %s', str(e))
-            pass
+            worker = PortForwardWorker(self._sock)
+            if not worker.setup_map_sock(self._port_map_conf[0]):
+                self._sock.close()
+                return
 
-        self._threads.remove(t)
+            if self._port_map_conf[1]:
+                # send request port map config
+                content = json.dumps(self._port_map_conf[1]).encode()
+                d = tunnel_packet_pack(content, PacketHeader.port_map, 0, 0, 0)
+                n = self._sock.send(d)
+                assert n == len(d)
 
-    def forward_socket(self, soc1, soc2):
+            if self._show_status and self._status_period > 0:
+                self._start_thread(self._status, ())
 
-        soc1.setblocking(False)
-        soc2.setblocking(False)
-        q1 = deque()
-        q2 = deque()
-
-        rs = [soc1, soc2]
-        ws = []
-        while not self._terminate and rs:
-            r, w, _ = select.select(rs, ws, [], 1)
-
-            ws = []
-
-            if soc1 in r:
-                data = soc1.recv(2048)
-                q1.append(data)
-            if soc2 in r:
-                data = soc2.recv(2048)
-                q2.append(data)
-
-            if soc1 in w and q2:
-                soc1.send(q2.popleft())
-            if soc2 in w and q1:
-                soc2.send(q1.popleft())
-
-            if q1:
-                ws.append(soc2)
-            if q2:
-                ws.append(soc1)
-
-        logging.info("forward thread exit!")
+            worker.main_proc()
+            self._terminate = True
+        except KeyboardInterrupt:
+            self._terminate = True
+            if worker:
+                worker.terminate()
+            raise UserAbort()
 
 
 if __name__ == '__main__':
     args = parse_args()
     set_loggint_format(args.verbose)
-    local_addr = ("0.0.0.0", args.lport)
-    remote_addr = (args.rip, args.rport)
 
-    with PortForward(1, local_addr, remote_addr) as f:
-        f.run()
+    params = (
+        (args.ip, args.port),
+        (args.local_port_map, args.remote_port_map),
+        args.show_status, args.status_period
+    )
 
-    logging.info('port forward exit')
+    fail_try_time = 0
+    wait_time = 5
+    #
+    # 12小时内不恢复，则退出
+    #
+    while fail_try_time < 3600*12/wait_time:
+        normal_exit = False
+        try:
+            if args.is_tunnel_server:
+                with PortForwardServer(*params) as f:
+                    f.run()
+            else:
+                with PortForwardClient(*params) as f:
+                    f.run()
+            normal_exit = True
+            # 恢复计数
+            fail_try_time = 0
+        except (socket.gaierror, OSError) as e:
+            logging.warning(
+                "Port Forward instance exit\n(%s)",
+                traceback.format_exc())
+        except TunnelOffline:
+            logging.info(
+                "Tunnel offline\n(%s)",
+                traceback.format_exc())
+        except UserAbort as e:
+            logging.warning(
+                "Port Forward abort")
+            exit(1)
+        except Exception as e:
+            logging.error(
+                "Port Forward instance exit\n(%s)",
+                traceback.format_exc())
+
+        if not normal_exit:
+            fail_try_time += 1
+
+        # 避免无限失败请求
+        time.sleep(wait_time)
+
+        STATS.restart_times += 1
