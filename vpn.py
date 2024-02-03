@@ -512,7 +512,7 @@ def nat_tunnel_build(
                 peer_addr[1] + port_offset1)
 
             if not r:
-                t = random.random() / 10
+                t = random.random() / 3
                 select_timeout = t
 
         if not r and not w:
