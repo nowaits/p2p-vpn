@@ -52,6 +52,7 @@
 ### TODO
 
 1. 创建windows服务
+2. 发送Ctrl+C中断: `kill -SIGINT $pid`
 
 ### DOC
 

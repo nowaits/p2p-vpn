@@ -191,6 +191,9 @@ class PortForwardWorker(object):
         self._rs = [self._tunnel_sock]
         self._ws = []
 
+        self._tunnel_sock.setblocking(False)
+        self._tunnel_sock.settimeout(30)
+
         STATS.workers[self._id] = self
 
     def setup_map_sock(self, port_maps_conf):
@@ -325,15 +328,18 @@ class PortForwardWorker(object):
 
                 if sock == self._tunnel_sock:
                     try:
+                        _e = None
                         data = sock.recv(STATS.MTU)
                     except ConnectionResetError:
-                        self.terminate_with_except(
-                            TunnelOffline("tunnel offline"))
+                        _e = TunnelOffline("tunnel offline")
                     except TimeoutError:
-                        self.terminate_with_except(
-                            TunnelOffline("tunnel timeout"))
+                        _e = TunnelOffline("tunnel timeout")
+                    finally:
+                        if _e:
+                            self.terminate_with_except(_e)
 
                     if not data:
+                        logging.warning("Forward Worker peer closed!")
                         self._terminate = True
                         break
 
@@ -341,6 +347,7 @@ class PortForwardWorker(object):
                     while len(data_buffer) >= PacketHeader.format_size:
                         t, stype, client_port, target_port, l = struct.unpack_from(
                             PacketHeader.format, data_buffer)
+                        assert l <= STATS.MTU
                         if PacketHeader.format_size + l > len(data_buffer):
                             # logging.debug(
                             #     "need for data!(%d/%d)",
@@ -401,6 +408,7 @@ class PortForwardWorker(object):
                                 s.close()
                                 continue
                             s.setblocking(False)
+                            s.settimeout(30)
                             clients[k] = (
                                 s, stype, client_port, target_port)
                             assert s.fileno() not in clients
@@ -453,6 +461,7 @@ class PortForwardWorker(object):
                     listen_port_info = self._port_maps[fid][1]
                     s, ra = sock.accept()
                     s.setblocking(False)
+                    s.settimeout(30)
                     la = s.getsockname()
                     assert la[1] == listen_port_info[1]
 
@@ -535,6 +544,9 @@ class PortForwardWorker(object):
                     self.terminate_with_except(
                         Exception("Unknow RX socket!", sock))
 
+            if self._terminate:
+                break
+
             for sock in list(w):
                 fid = sock.fileno()
                 assert fid != -1
@@ -610,6 +622,7 @@ class PortForwardBase(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         assert self._sock.fileno() == -1
+        logging.debug("Port Forward closing!")
         for t in self._threads:
             t.join()
         assert not STATS.workers
@@ -715,6 +728,7 @@ class PortForwardClient(PortForwardBase):
     def run(self):
         worker = None
         try:
+            _e = None
             # set tcp keepalive
             utils.set_keep_alive(self._sock)
             la = self._sock.getsockname()
@@ -744,7 +758,10 @@ class PortForwardClient(PortForwardBase):
             self._terminate = True
             if worker:
                 worker.terminate()
-            raise UserAbort()
+            _e = UserAbort()
+        finally:
+            if _e:
+                raise _e
 
 
 if __name__ == '__main__':
@@ -785,6 +802,11 @@ if __name__ == '__main__':
         except UserAbort as e:
             logging.warning(
                 "Port Forward abort")
+            exit(1)
+        except AssertionError:
+            logging.error(
+                "Port Forward fatal error!\n(%s)",
+                traceback.format_exc())
             exit(1)
         except Exception as e:
             logging.error(
