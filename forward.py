@@ -106,6 +106,7 @@ class STATS():
     def status(index, alive):
 
         if not STATS.workers:
+            logging.warning("no workers!")
             return
 
         # [rx bps, tx bps]
@@ -196,6 +197,9 @@ class PortForwardWorker(object):
 
         STATS.workers[self._id] = self
 
+    def id(self):
+        return self._id
+
     def setup_map_sock(self, port_maps_conf):
         added_port_map = []
 
@@ -239,7 +243,6 @@ class PortForwardWorker(object):
 
     def terminate_with_except(self, e):
         self._terminate = True
-        del STATS.workers[self._id]
         for _, m in self._port_maps.items():
             m[0].close()
         self._tunnel_sock.close()
@@ -592,7 +595,6 @@ class PortForwardWorker(object):
                     if tx_queue:
                         self.set_pending_write(v[0])
 
-        del STATS.workers[self._id]
         self._tunnel_sock.close()
         for _, m in self._port_maps.items():
             m[0].close()
@@ -616,6 +618,7 @@ class PortForwardBase(object):
         self._terminate = False
         self._show_status = show_status
         self._status_period = status_period
+        self._workers = []
 
     def __enter__(self):
         return self
@@ -623,9 +626,14 @@ class PortForwardBase(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         assert self._sock.fileno() == -1
         logging.debug("Port Forward closing!")
+        for w in self._workers:
+            del STATS.workers[w.id()]
+            w.terminate()
+
         for t in self._threads:
             t.join()
-        assert not STATS.workers
+
+        self._workers = []
         logging.info("Port Forward closed!")
 
     def _start_thread(self, func, param):
@@ -652,7 +660,6 @@ class PortForwardServer(PortForwardBase):
         ws = []
         stats_index = 0
         start = time.time()
-        workers = []
         while not self._terminate:
             try:
                 r, w, _ = select.select(rs, ws, [], self._status_period)
@@ -682,7 +689,7 @@ class PortForwardServer(PortForwardBase):
                             n = tunnel_client.send(d)
                             assert n == len(d)
 
-                        workers.append(worker)
+                        self._workers.append(worker)
                         self._start_thread(worker.main_proc, ())
                     except:
                         tunnel_client.close()
@@ -693,8 +700,6 @@ class PortForwardServer(PortForwardBase):
                     stats_index += 1
             except KeyboardInterrupt:
                 self._terminate = True
-                for w in workers:
-                    w.terminate()
                 self._sock.close()
                 raise UserAbort()
 
@@ -752,12 +757,11 @@ class PortForwardClient(PortForwardBase):
             if self._show_status and self._status_period > 0:
                 self._start_thread(self._status, ())
 
+            self._workers.append(worker)
             worker.main_proc()
             self._terminate = True
         except KeyboardInterrupt:
             self._terminate = True
-            if worker:
-                worker.terminate()
             _e = UserAbort()
         finally:
             if _e:
