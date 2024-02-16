@@ -43,6 +43,9 @@ def set_loggint_format(level):
 
 
 def parse_args():
+    def str2bool(str):
+        return True if str.lower() == 'true' else False
+
     def parse_maps(str):
         m = []
         protos = {"tcp": socket.SOCK_STREAM, "udp": socket.SOCK_DGRAM}
@@ -56,7 +59,7 @@ def parse_args():
     parser.add_argument(
         "--is-tunnel-server", action='store_true', help="is tunnel server, default: false")
     parser.add_argument(
-        "--show-status", action='store_true', help="show status")
+        "--show-status", default="true", type=str2bool, help="show status")
     parser.add_argument(
         "--ip", type=str, default="0.0.0.0", help="agent/server IP")
     parser.add_argument(
@@ -97,11 +100,6 @@ class STATS():
     MTU = 2048
     restart_times = 0
     workers = {}
-
-    # 请求限速功能
-    client_open_rate = 20  # 每秒最多打开20次
-    # <IP, [last time]>
-    cient_stats = {}
 
     def status(index, alive):
 
@@ -468,21 +466,6 @@ class PortForwardWorker(object):
                     la = s.getsockname()
                     assert la[1] == listen_port_info[1]
 
-                    # 请求限速功能
-                    if ra[0] not in STATS.cient_stats:
-                        STATS.cient_stats[ra[0]] = [now]
-                    else:
-                        STATS.client_rate = STATS.cient_stats[ra[0]]
-                        if now - STATS.client_rate[0] < 1 / STATS.client_open_rate:
-                            s.close()
-                            logging.warning(
-                                "Forward client -> tunnel session %s %s:%d => %s:%d to fast!",
-                                "tcp" if listen_port_info[0] == socket.SOCK_STREAM else "udp",
-                                la[0], la[1], ra[0], ra[1])
-                            continue
-                        else:
-                            STATS.client_rate[0] = now
-
                     client_port = ra[1]
                     k = "%d-%d-%d" % (
                         listen_port_info[0], client_port, listen_port_info[2])
@@ -631,7 +614,7 @@ class PortForwardBase(object):
             w.terminate()
 
         for t in self._threads:
-            t.join()
+            t.join(timeout=5)
 
         self._workers = []
         logging.info("Port Forward closed!")
@@ -662,6 +645,7 @@ class PortForwardServer(PortForwardBase):
         start = time.time()
         while not self._terminate:
             try:
+                _e = None
                 r, w, _ = select.select(rs, ws, [], self._status_period)
 
                 now = time.time()
@@ -699,9 +683,16 @@ class PortForwardServer(PortForwardBase):
                     STATS.status(stats_index, now - start)
                     stats_index += 1
             except KeyboardInterrupt:
-                self._terminate = True
                 self._sock.close()
-                raise UserAbort()
+                _e = UserAbort()
+                self._terminate = True
+            except Exception as e:
+                self._sock.close()
+                _e = e
+                self._terminate = True
+            finally:
+                if _e:
+                    raise _e
 
 
 class PortForwardClient(PortForwardBase):
@@ -759,10 +750,14 @@ class PortForwardClient(PortForwardBase):
 
             self._workers.append(worker)
             worker.main_proc()
-            self._terminate = True
         except KeyboardInterrupt:
-            self._terminate = True
+            self._sock.close()
             _e = UserAbort()
+            self._terminate = True
+        except Exception as e:
+            self._sock.close()
+            _e = e
+            self._terminate = True
         finally:
             if _e:
                 raise _e

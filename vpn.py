@@ -151,7 +151,7 @@ class VPN(object):
         self._mock_sock[0].close()
         self._mock_sock[1].close()
         for t in self._threads:
-            t.join()
+            t.join(timeout=5)
         logging.info("VPN closed!")
 
     def _tun_read(self):
@@ -237,128 +237,130 @@ class VPN(object):
         while not self._terminate:
             try:
                 r, w, _ = select.select(rs, ws, [], 5)
+
+                ws = []
+                now = time.time()
+
+                if not r and not w:
+                    #
+                    # request heartbeat if no recv data
+                    #
+                    #   1. 无数据时，请求发送心跳
+                    #   2. 如果接收到数据，则取消心跳发送
+                    #
+                    need_send_heart = True
+                    ws.append(self._sock)
+
+                    if now - self._last_recv_data_time > 30:
+                        logging.error("Heartbeat timeout!")
+                        self._terminate = True
+                    continue
+
+                if self._sock in r:
+                    d = self._sock.recv(2048)
+                    t, p = vpn_packet_unpack(d)
+                    if t == PacketHeader.data:
+                        self._tun_write_queue.put(p)
+                        self._rx_rate.feed(now, len(p))
+                        self._last_recv_data_time = now
+                        need_send_heart = False
+                    elif t == PacketHeader.heartbeat:
+                        self._last_recv_data_time = now
+                        need_send_heart = False
+                        need_send_heart_ack = True
+                        ws.append(self._sock)
+                        # logging.info("Heartbeat recv:%s", str(p))
+                        pass
+                    elif t == PacketHeader.heartbeat_ack:
+                        self._last_recv_data_time = now
+                        need_send_heart = False
+                        need_send_heart_ack = False
+                        # logging.info("Heartbeat ack:%s", str(p))
+                        pass
+                    elif t == PacketHeader.control:
+                        logging.warning(
+                            "VPN Packet control message: %s", p.decode())
+                    elif t == PacketHeader.invalid_type:
+                        logging.warning("VPN Packet type invalid!")
+                    elif t == PacketHeader.invalid_len:
+                        logging.warning("VPN Packet len invalid!")
+                    else:
+                        logging.error("VPN Packet type:%d unknow!", t)
+
+                if self._tun.handle in r:
+                    d = self._tun.read(2048)
+                    # logging.debug("tun read:%s", IP(p).summary())
+                    p = vpn_packet_pack(d, PacketHeader.data)
+                    self._tun_read_queue.put(p)
+
+                if self._mock_sock[0] in r and self._sock in w:
+                    assert not self._select_tun
+                    self._mock_sock[0].recv(32)  # drop msg
+                    if self._tun_read_queue.qsize() > 0:
+                        p = self._tun_read_queue.get()
+                        self._sock.send(p)
+                        w.remove(self._sock)
+                        self._tx_rate.feed(now, len(p))
+
+                n = self._tun_read_queue.qsize()
+                if n > 0:
+                    if self._sock in w:
+                        p = self._tun_read_queue.get()
+                        self._sock.send(p)
+                        w.remove(self._sock)
+                        self._tx_rate.feed(now, len(p))
+                        n -= 1
+                    if n > 0:
+                        ws.append(self._sock)
+
+                if need_send_heart:
+                    if self._sock in w:
+                        content = '%d:%f' % (heartbeat_seq_no, now)
+                        d = vpn_packet_pack(
+                            content.encode(), PacketHeader.heartbeat)
+                        self._sock.send(d)
+                        need_send_heart = False
+                        heartbeat_seq_no += 1
+                        w.remove(self._sock)
+                        logging.debug("Send heartbeat")
+                    else:
+                        ws.append(self._sock)
+
+                if need_send_heart_ack:
+                    if self._sock in w:
+                        content = '%d:%f' % (heartbeat_seq_no, now)
+                        d = vpn_packet_pack(
+                            content.encode(), PacketHeader.heartbeat_ack)
+                        self._sock.send(d)
+                        need_send_heart_ack = False
+                        w.remove(self._sock)
+                        logging.debug("Send heartbeat ack")
+                    else:
+                        ws.append(self._sock)
+
+                if not self._select_tun:
+                    continue
+
+                n = self._tun_write_queue.qsize()
+                if n > 0:
+                    if self._tun.handle in w:
+                        p = self._tun_write_queue.get()
+                        # logging.debug("tun write:%s", IP(p).summary())
+                        self._tun.write(p)
+                        n -= 1
+
+                    if n > 0:
+                        ws.append(self._tun.handle)
             except KeyboardInterrupt:
                 self._terminate = True
-                logging.error("VPN proc exist!")
-                break
-
-            ws = []
-            now = time.time()
-
-            if not r and not w:
-                #
-                # request heartbeat if no recv data
-                #
-                #   1. 无数据时，请求发送心跳
-                #   2. 如果接收到数据，则取消心跳发送
-                #
-                need_send_heart = True
-                ws.append(self._sock)
-
-                if now - self._last_recv_data_time > 30:
-                    logging.error("Heartbeat timeout!")
-                    self._terminate = True
-                continue
-
-            if self._sock in r:
-                try:
-                    p = self._sock.recv(2048)
-                except ConnectionRefusedError:
-                    self._terminate = True
-                    break
-                t, p = vpn_packet_unpack(p)
-                if t == PacketHeader.data:
-                    self._tun_write_queue.put(p)
-                    self._rx_rate.feed(now, len(p))
-                    self._last_recv_data_time = now
-                    need_send_heart = False
-                elif t == PacketHeader.heartbeat:
-                    self._last_recv_data_time = now
-                    need_send_heart = False
-                    need_send_heart_ack = True
-                    ws.append(self._sock)
-                    # logging.info("Heartbeat recv:%s", str(p))
-                    pass
-                elif t == PacketHeader.heartbeat_ack:
-                    self._last_recv_data_time = now
-                    need_send_heart = False
-                    need_send_heart_ack = False
-                    # logging.info("Heartbeat ack:%s", str(p))
-                    pass
-                elif t == PacketHeader.control:
-                    logging.warning(
-                        "VPN Packet control message: %s", p.decode())
-                elif t == PacketHeader.invalid_type:
-                    logging.warning("VPN Packet type invalid!")
-                elif t == PacketHeader.invalid_len:
-                    logging.warning("VPN Packet len invalid!")
-                else:
-                    logging.error("VPN Packet type:%d unknow!", t)
-
-            if self._tun.handle in r:
-                p = self._tun.read(2048)
-                # logging.debug("tun read:%s", IP(p).summary())
-                p = vpn_packet_pack(p, PacketHeader.data)
-                self._tun_read_queue.put(p)
-
-            if self._mock_sock[0] in r and self._sock in w:
-                assert not self._select_tun
-                self._mock_sock[0].recv(32)  # drop msg
-                if self._tun_read_queue.qsize() > 0:
-                    p = self._tun_read_queue.get()
-                    self._sock.send(p)
-                    w.remove(self._sock)
-                    self._tx_rate.feed(now, len(p))
-
-            n = self._tun_read_queue.qsize()
-            if n > 0:
-                if self._sock in w:
-                    p = self._tun_read_queue.get()
-                    self._sock.send(p)
-                    w.remove(self._sock)
-                    self._tx_rate.feed(now, len(p))
-                    n -= 1
-                if n > 0:
-                    ws.append(self._sock)
-
-            if need_send_heart:
-                if self._sock in w:
-                    content = '%d:%f' % (heartbeat_seq_no, now)
-                    d = vpn_packet_pack(
-                        content.encode(), PacketHeader.heartbeat)
-                    self._sock.send(d)
-                    need_send_heart = False
-                    heartbeat_seq_no += 1
-                    w.remove(self._sock)
-                    logging.debug("Send heartbeat")
-                else:
-                    ws.append(self._sock)
-
-            if need_send_heart_ack:
-                if self._sock in w:
-                    content = '%d:%f' % (heartbeat_seq_no, now)
-                    d = vpn_packet_pack(
-                        content.encode(), PacketHeader.heartbeat_ack)
-                    self._sock.send(d)
-                    need_send_heart_ack = False
-                    w.remove(self._sock)
-                    logging.debug("Send heartbeat ack")
-                else:
-                    ws.append(self._sock)
-
-            if not self._select_tun:
-                continue
-
-            n = self._tun_write_queue.qsize()
-            if n > 0:
-                if self._tun.handle in w:
-                    p = self._tun_write_queue.get()
-                    # logging.debug("tun write:%s", IP(p).summary())
-                    self._tun.write(p)
-                    n -= 1
-
-                if n > 0:
-                    ws.append(self._tun.handle)
+                logging.info(
+                    "VPN proc user canceled\n(%s)",
+                    traceback.format_exc())
+            except Exception:
+                self._terminate = True
+                logging.error(
+                    "VPN proc exit\n(%s)",
+                    traceback.format_exc())
 
         logging.info("VPN Server exit!")
 

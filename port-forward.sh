@@ -1,1 +1,0 @@
-python3 forward.py --is-tunnel-server --show-status --status-period=60
