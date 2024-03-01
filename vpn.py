@@ -72,8 +72,8 @@ def parse_args():
         "--timeout", type=int, default=30,
         help="connect timeout, default 30s")
     parser.add_argument(
-        "--port-range", "-r", type=int, default=1000,
-        help="port range, default 1000")
+        "--port-range", "-r", type=int, default=200,
+        help="port range, default 200")
     parser.add_argument(
         "--vip", type=str, default="10.0.0.1",
         help="virtual ip, default 10.0.0.1")
@@ -115,6 +115,8 @@ def vpn_packet_pack(p, t):
 
 
 def vpn_packet_unpack(p):
+    if len(p) < PacketHeader.format_size:
+        return (PacketHeader.invalid_len, None)
     t, l = struct.unpack_from(PacketHeader.format, p)
     if t >= PacketHeader.invalid_type:
         return (PacketHeader.invalid_type, None)
@@ -365,53 +367,95 @@ class VPN(object):
         logging.info("VPN Server exit!")
 
 
+def waiting_nat_peer_online(instance_id, server, port, user, passwd):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setblocking(False)
+        ws = [s]
+
+        challenge = None
+        while True:
+            r, w, _ = select.select([s], ws, [], 10)
+            ws = []
+            if s in r:
+                data, addr = s.recvfrom(2048)
+                try:
+                    if addr[0] != server or addr[1] != port:
+                        continue
+
+                    info = json.loads(data.decode())
+                    if type(info) != dict:
+                        logging.error(
+                            "Resp:%s from server invalid!", str(info))
+                        continue
+                except Exception as e:
+                    logging.error("Decode %s error(%s)", str(data), str(e))
+                    continue
+
+                if "action" in info:
+                    action = info["action"]
+                    if action == "challenge":
+                        if "challenge" not in info:
+                            continue
+
+                        if challenge != info["challenge"]:
+                            ws.append(s)
+                            challenge = info["challenge"]
+                    elif "auth-failed" in info:
+                        raise AuthCheckFailed("Passwd check failed!")
+                    elif action == "peer-ready":
+                        if "token" not in info:
+                            raise Exception(
+                                "response format error!(%s)", str(info))
+                        return info["token"]
+
+            if s in w:
+                content = {
+                    "user": user,
+                    "instance_id": instance_id,
+                    "action": "wait-peer",
+                }
+
+                if challenge:
+                    content["auth"] = hmac.new(
+                        challenge.encode(),
+                        (user+passwd).encode(),
+                        digestmod='md5'
+                    ).hexdigest()[:16]
+                s.sendto(json.dumps(content).encode(), (server, port))
+
+            if not r and not w:
+                ws.append(s)
+
+
 def nat_tunnel_build(
         instance_id, server, port, port_try_range,
-        user, passwd, timeout, request_forward=False):
+        user, token, timeout, request_forward=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setblocking(False)
 
     # 1. get peer addr
     peer_addr = None
     start_time = time.time()
-    challenge = None
     ws = [s]
-    connect_ready = False
-    if request_forward:
-        connect_ready = True
     while not peer_addr:
-        r, w, _ = select.select([s], ws, [], 0.1 if connect_ready else 10)
+        r, w, _ = select.select([s], ws, [], 0.5)
         ws = []
 
         if s in r:
             data, addr = s.recvfrom(2048)
             try:
+                if addr[0] != server or addr[1] != port:
+                    continue
+
                 info = json.loads(data.decode())
+                if type(info) != dict:
+                    logging.error("Resp:%s from server invalid!", str(info))
+                    continue
             except Exception as e:
                 logging.error("Decode %s error(%s)", str(data), str(e))
                 continue
 
-            if type(info) != dict:
-                logging.error("Resp:%s from server invalid!", str(info))
-                continue
-
-            if "challenge" in info:
-                logging.debug(
-                    "Challenge update: %s -> %s",
-                    challenge, info["challenge"])
-                challenge = info["challenge"]
-                ws.append(s)
-                continue
-
             logging.debug("Resp:%s from server", str(info))
-            if "auth-failed" in info:
-                s.close()
-                raise AuthCheckFailed("Passwd check failed!")
-
-            if not connect_ready and "ready" in info and info["ready"]:
-                connect_ready = True
-                continue
-
             key_missing = False
             for k in ["addr", "port"]:
                 if k not in info:
@@ -427,8 +471,9 @@ def nat_tunnel_build(
                 logging.info("Get peer addr: %s:%d",
                              peer_addr[0], peer_addr[1])
             else:
-                logging.info("Forward tunnel with peer addr: %s:%d ok!",
-                             peer_addr[0], peer_addr[1])
+                logging.info(
+                    "Forward tunnel with peer addr: %s:%d ok!",
+                    peer_addr[0], peer_addr[1])
                 s.connect((server, port))
                 return s
 
@@ -436,20 +481,13 @@ def nat_tunnel_build(
             content = {
                 "user": user,
                 "instance_id": instance_id,
+                "token": token,
                 "action": "peer-info" if not request_forward else "request-forward",
-                "ready": connect_ready,
             }
-
-            if challenge != None:
-                content["auth"] = hmac.new(
-                    challenge.encode(),
-                    (user+passwd).encode(),
-                    digestmod='md5'
-                ).hexdigest()[:16]
 
             s.sendto(json.dumps(content).encode(), (server, port))
 
-        if request_forward and time.time() - start_time > timeout:
+        if time.time() - start_time > timeout:
             logging.error("Get peer info timeout(%ds)", timeout)
             s.close()
             return None
@@ -472,7 +510,6 @@ def nat_tunnel_build(
     select_timeout = 0.1
     while True:
         r, w, _ = select.select([s], ws, [], select_timeout)
-
         ws = []
 
         if s in r:
@@ -514,7 +551,7 @@ def nat_tunnel_build(
                 peer_addr[1] + port_offset1)
 
             if not r:
-                t = random.random() / 3
+                t = random.random() / 5
                 select_timeout = t
 
         if not r and not w:
@@ -588,17 +625,22 @@ def setup_p2p_vpn(instance_id):
 
     tun = (args.vip, args.vmask, args.mtu)
     server = socket.gethostbyname(args.server)
+
+    # do waiting peer online
+    logging.info("Waiting peer online...")
+    token = waiting_nat_peer_online(
+        instance_id, server,
+        args.port, args.user, args.passwd)
+    logging.info("Begin building NAT-Tunnel...")
     s = nat_tunnel_build(
-        instance_id,
-        server, args.port,
-        args.port_range, args.user, args.passwd,
+        instance_id, server, args.port,
+        args.port_range, args.user, token,
         args.timeout)
     if not s:
         logging.error("NAT Tunnel build timeout!")
         s = nat_tunnel_build(
-            instance_id,
-            server, args.port,
-            args.port_range, args.user, args.passwd,
+            instance_id, server, args.port,
+            args.port_range, args.user, token,
             min(args.timeout, 30),
             request_forward=True)
         if not s:
@@ -615,15 +657,20 @@ if __name__ == '__main__':
 
     instance_id = utils.device_id()
 
+    fail_try_time = 0
+    wait_time = 5
     while True:
+        normal_exit = False
         try:
             if args.cs_vpn:
                 setup_cs_vpn(instance_id)
             else:
                 setup_p2p_vpn(instance_id)
+            normal_exit = True
+            # 恢复计数
+            fail_try_time = 0
         except (socket.gaierror, OSError) as e:
             logging.warning("VPN instance exit(%s)", str(e))
-            time.sleep(5)
         except AuthCheckFailed as e:
             logging.error("VPN instance exit(%s)", str(e))
             break
@@ -633,3 +680,9 @@ if __name__ == '__main__':
 
         if not args.run_as_service:
             break
+
+        if not normal_exit:
+            fail_try_time += 1
+
+        # 避免无限失败请求
+        time.sleep((fail_try_time + 1) * wait_time)

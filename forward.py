@@ -816,6 +816,6 @@ if __name__ == '__main__':
             fail_try_time += 1
 
         # 避免无限失败请求
-        time.sleep(wait_time)
+        time.sleep((fail_try_time + 1) * wait_time)
 
         STATS.restart_times += 1

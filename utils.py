@@ -16,6 +16,30 @@ def device_id():
     return hashlib.md5(id.encode()).hexdigest()[:16]
 
 
+def alloc_local_udp_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        while True:
+            port = int(random.random()*65536)
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError as e:
+                continue
+
+    return 0
+
+
+def local_udp_port_binded(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+            return False
+        except OSError as e:
+            return True
+
+    return 0
+
+
 def rate_format(rate):
     rate *= 1.0
 
