@@ -241,9 +241,6 @@ class PortForwardWorker(object):
 
     def terminate_with_except(self, e):
         self._terminate = True
-        for _, m in self._port_maps.items():
-            m[0].close()
-        self._tunnel_sock.close()
         raise e
 
     def set_pending_write(self, s):
@@ -274,7 +271,7 @@ class PortForwardWorker(object):
             _pkts += 1
         return (_pkts, _bytes)
 
-    def main_proc(self):
+    def do_main_proc(self):
         self._tunnel_sock.setblocking(False)
 
         self._last_recv_data_time = time.time()
@@ -578,9 +575,18 @@ class PortForwardWorker(object):
                     if tx_queue:
                         self.set_pending_write(v[0])
 
+    def main_proc(self):
+        try:
+            self.do_main_proc()
+        except:
+            logging.error(
+                "Port Forward worker exit\n(%s)",
+                traceback.format_exc())
+
         self._tunnel_sock.close()
         for _, m in self._port_maps.items():
             m[0].close()
+
         logging.info("Forward Worker exit!")
 
 
