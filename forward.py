@@ -101,7 +101,7 @@ class STATS():
     restart_times = 0
     workers = {}
 
-    def status(index, alive):
+    def status(alive):
 
         if not STATS.workers:
             logging.warning("no workers!")
@@ -183,7 +183,6 @@ class PortForwardWorker(object):
         self._port_maps = {}
         self._rx_rate = utils.Rate()
         self._tx_rate = utils.Rate()
-        self._terminate = False
         # <fid, [tx cache, rx cache，client_idx, target_idx]>
         self._status = STATS.stats_max_idx * [0]
 
@@ -238,10 +237,6 @@ class PortForwardWorker(object):
 
     def terminate(self):
         self._terminate = True
-
-    def terminate_with_except(self, e):
-        self._terminate = True
-        raise e
 
     def set_pending_write(self, s):
         if s in self._ws:
@@ -308,11 +303,11 @@ class PortForwardWorker(object):
             del clients[k]
             del clients_fds[s_fid]
 
+        self._terminate = False
         while not self._terminate:
             try:
                 r, w, _ = select.select(self._rs, self._ws, [], 1)
             except KeyboardInterrupt:
-                self._terminate = True
                 logging.error("Forward Worker proc exist!")
                 break
 
@@ -334,7 +329,7 @@ class PortForwardWorker(object):
                         _e = TunnelOffline("tunnel timeout")
                     finally:
                         if _e:
-                            self.terminate_with_except(_e)
+                            raise _e
 
                     if not data:
                         logging.warning("Forward Worker peer closed!")
@@ -449,12 +444,11 @@ class PortForwardWorker(object):
                                 continue
 
                             if not self.setup_map_sock(info):
-                                self.terminate()
+                                self._terminate = True
                                 logging.error(
                                     "Setup Recv conf: (%s) failded", str(p))
                         else:
-                            self.terminate_with_except(
-                                Exception("Unknow packet type:%d!", t))
+                            raise Exception("Unknow packet type:%d!", t)
                 elif fid in self._port_maps:
                     listen_port_info = self._port_maps[fid][1]
                     s, ra = sock.accept()
@@ -524,8 +518,7 @@ class PortForwardWorker(object):
                         self._tx_rate.feed(now, _bytes, _pkts)
                     self.set_pending_write(self._tunnel_sock)
                 else:
-                    self.terminate_with_except(
-                        Exception("Unknow RX socket!", sock))
+                    raise Exception("Unknow RX socket!", sock)
 
             if self._terminate:
                 break
@@ -557,8 +550,7 @@ class PortForwardWorker(object):
                     if tx_queue:
                         self.set_pending_write(sock)
                 else:
-                    self.terminate_with_except(
-                        Exception("Unknow TX socket!", sock))
+                    raise Exception("Unknow TX socket!", sock)
 
             # 每隔1s更新一次计数
             if now - stats_last_update_time > 1:
@@ -591,8 +583,7 @@ class PortForwardWorker(object):
 
 
 class PortForwardBase(object):
-    def __init__(self, port_map_conf,
-                 show_status=False, status_period=0):
+    def __init__(self, port_map_conf):
         '''
         port-map: 
             (tcp/udp, local port, remote port)
@@ -604,9 +595,6 @@ class PortForwardBase(object):
         '''
         self._threads = []
         self._port_map_conf = port_map_conf
-        self._terminate = False
-        self._show_status = show_status
-        self._status_period = status_period
         self._workers = []
 
     def __enter__(self):
@@ -635,10 +623,8 @@ class PortForwardBase(object):
 
 class PortForwardServer(PortForwardBase):
     def __init__(
-            self, tunnel_addr, port_map_conf,
-            show_status=False, status_period=0):
-        PortForwardBase.__init__(
-            self, port_map_conf, show_status, status_period)
+            self, tunnel_addr, port_map_conf):
+        PortForwardBase.__init__(self, port_map_conf)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(tunnel_addr)
@@ -646,15 +632,11 @@ class PortForwardServer(PortForwardBase):
 
     def run(self):
         rs = [self._sock]
-        ws = []
-        stats_index = 0
-        start = time.time()
-        while not self._terminate:
+        while True:
             try:
                 _e = None
-                r, w, _ = select.select(rs, ws, [], self._status_period)
+                r, _, _ = select.select(rs, [], [], 30)
 
-                now = time.time()
                 if self._sock in r:
                     tunnel_client, ra = self._sock.accept()
                     # set tcp keepalive
@@ -685,17 +667,12 @@ class PortForwardServer(PortForwardBase):
                         tunnel_client.close()
                         logging.error("Port Forward instance exit\n%s",
                                       traceback.format_exc())
-                if not r and not w and self._show_status:
-                    STATS.status(stats_index, now - start)
-                    stats_index += 1
             except KeyboardInterrupt:
                 self._sock.close()
                 _e = UserAbort()
-                self._terminate = True
             except Exception as e:
                 self._sock.close()
                 _e = e
-                self._terminate = True
             finally:
                 if _e:
                     raise _e
@@ -703,29 +680,11 @@ class PortForwardServer(PortForwardBase):
 
 class PortForwardClient(PortForwardBase):
     def __init__(
-            self, tunnel_addr, port_map_conf,
-            show_status=False, status_period=0):
-        PortForwardBase.__init__(
-            self, port_map_conf, show_status, status_period)
+            self, tunnel_addr, port_map_conf):
+        PortForwardBase.__init__(self, port_map_conf)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.connect(tunnel_addr)
-
-    def _status(self):
-        index = 0
-        start = time.time()
-        last_time = start
-        while not self._terminate:
-            time.sleep(1)
-            now = time.time()
-            if now - last_time < self._status_period:
-                continue
-
-            last_time = now
-            STATS.status(index, now - start)
-            index += 1
-
-        logging.info("status thread exit!")
 
     def run(self):
         worker = None
@@ -751,19 +710,14 @@ class PortForwardClient(PortForwardBase):
                 n = self._sock.send(d)
                 assert n == len(d)
 
-            if self._show_status and self._status_period > 0:
-                self._start_thread(self._status, ())
-
             self._workers.append(worker)
             worker.main_proc()
         except KeyboardInterrupt:
             self._sock.close()
             _e = UserAbort()
-            self._terminate = True
         except Exception as e:
             self._sock.close()
             _e = e
-            self._terminate = True
         finally:
             if _e:
                 raise _e
@@ -775,9 +729,30 @@ if __name__ == '__main__':
 
     params = (
         (args.ip, args.port),
-        (args.local_port_map, args.remote_port_map),
-        args.show_status, args.status_period
+        (args.local_port_map, args.remote_port_map)
     )
+
+    terminate = False
+    status_thread = None
+
+    def status_proc():
+        start = time.time()
+        last_time = start
+        while not terminate:
+            time.sleep(1)
+            now = time.time()
+            if now - last_time < args.status_period:
+                continue
+
+            last_time = now
+            STATS.status(now - start)
+
+        logging.info("status thread exit!")
+
+    if args.show_status:
+        status_thread = threading.Thread(target=status_proc, args=())
+        status_thread.daemon = True
+        status_thread.start()
 
     fail_try_time = 0
     wait_time = 5
@@ -825,3 +800,8 @@ if __name__ == '__main__':
         time.sleep((fail_try_time + 1) * wait_time)
 
         STATS.restart_times += 1
+
+    terminate = True
+    if status_thread:
+        status_thread.join(timeout=5)
+    logging.info("Port Forward service exit!")
