@@ -762,15 +762,18 @@ if __name__ == '__main__':
     while fail_try_time < 3600*12/wait_time:
         normal_exit = False
         try:
+            t = time.time()
             if args.is_tunnel_server:
                 with PortForwardServer(*params) as f:
                     f.run()
             else:
                 with PortForwardClient(*params) as f:
                     f.run()
-            normal_exit = True
-            # 恢复计数
-            fail_try_time = 0
+
+            if time.time() - t > 5:
+                normal_exit = True
+                # 恢复计数
+                fail_try_time = 0
         except (socket.gaierror, OSError) as e:
             logging.warning(
                 "Port Forward instance exit\n(%s)",
@@ -794,7 +797,11 @@ if __name__ == '__main__':
                 traceback.format_exc())
 
         if not normal_exit:
-            fail_try_time += 1
+            if fail_try_time * wait_time > 1800:
+                # 超过30分钟不恢复，恢复计数重试
+                fail_try_time = 0
+            else:
+                fail_try_time += 1
 
         # 避免无限失败请求
         time.sleep((fail_try_time + 1) * wait_time)
