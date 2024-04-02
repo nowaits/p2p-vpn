@@ -84,6 +84,8 @@ def parse_args():
     parser.add_argument("--passwd", type=str, help="user passwd")
     parser.add_argument(
         "--run-as-service", action='store_true', help="run as vpn service")
+    parser.add_argument(
+        "--p2p-test", action='store_true', help="test p2p throughout")
     parser.add_argument("--logfile", type=str, default=None,
                         help="if set, then running log redirect to file")
     parser.add_argument(
@@ -618,6 +620,43 @@ def setup_cs_vpn(instance_id):
         v.run()
 
 
+def test_throughput(s, duration):
+    time_last = time.time()
+    seconds = 0
+    data = 1400*'X'
+    rx_rate = utils.Rate()
+    tx_rate = utils.Rate()
+    while seconds < duration:
+        r, w, _ = select.select([s], [s], [], 1)
+        now = time.time()
+        if s in r:
+            d = s.recv(2048)
+            _, d = vpn_packet_unpack(d)
+            rx_rate.feed(now, len(d.decode()))
+        if s in w:
+            d = vpn_packet_pack(data.encode(), PacketHeader.data)
+            l = s.send(d)
+            tx_rate.feed(now, l)
+
+        if time_last + 1 < time.time():
+            time_last = now
+            r0 = rx_rate.format_now()
+            r1 = tx_rate.format_now()
+            a0 = rx_rate.format_avg()
+            a1 = tx_rate.format_avg()
+            t0 = rx_rate.format_total()
+            t1 = tx_rate.format_total()
+            logging.info(
+                "Rate(%s) "
+                "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
+                    utils.format_time_diff(seconds),
+                    r0[1], a0[1],
+                    r1[1], a1[1],
+                    t0[1], t1[1]))
+            seconds += 1
+    s.close()
+
+
 def setup_p2p_vpn(instance_id):
     if not args.user or not args.passwd:
         logging.error("Missing user or passwd for p2p vpn!")
@@ -646,6 +685,10 @@ def setup_p2p_vpn(instance_id):
         if not s:
             logging.error("Forward Tunnel build timeout!")
             return
+    elif args.p2p_test:
+        test_throughput(s, 30)
+        logging.info("P2P throught test finish!")
+        return
 
     with VPN(tun, s, args.show_status) as v:
         v.run()
@@ -680,7 +723,7 @@ if __name__ == '__main__':
             logging.error("VPN instance exit\n%s", traceback.format_exc())
             pass
 
-        if not args.run_as_service:
+        if not args.run_as_service or args.p2p_test:
             break
 
         if not normal_exit:
