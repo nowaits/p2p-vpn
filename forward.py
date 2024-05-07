@@ -11,6 +11,7 @@ import traceback
 import struct
 import json
 from collections import deque
+import hashlib
 
 SCRIPT = os.path.abspath(__file__)
 PWD = os.path.dirname(SCRIPT)
@@ -63,6 +64,8 @@ def parse_args():
     parser.add_argument(
         "--ip", type=str, default="0.0.0.0", help="agent/server IP")
     parser.add_argument(
+        "--server-key", type=str, default=None, help="server authentication key")
+    parser.add_argument(
         "--status-period", type=int, default=300, help="status-period, default:5min")
     parser.add_argument(
         "--port", type=int, default=5100,
@@ -84,6 +87,10 @@ def parse_args():
 
 
 class UserAbort(Exception):
+    pass
+
+
+class AuthFailed(Exception):
     pass
 
 
@@ -623,50 +630,141 @@ class PortForwardBase(object):
 
 class PortForwardServer(PortForwardBase):
     def __init__(
-            self, tunnel_addr, port_map_conf):
+            self, tunnel_addr, port_map_conf, server_key=None):
         PortForwardBase.__init__(self, port_map_conf)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(tunnel_addr)
         self._sock.listen(10)
+        self._server_key = server_key
+
+    def __gen_challenge(self):
+        s = str(time.time()).encode()
+        return hashlib.md5(s).hexdigest()[:16]
+
+    def __start_worker(self, sock):
+        worker = PortForwardWorker(sock)
+        if not worker.setup_map_sock(self._port_map_conf[0]):
+            return False
+
+        if self._port_map_conf[1]:
+            # send request port map config
+            content = json.dumps(
+                self._port_map_conf[1]).encode()
+            d = tunnel_packet_pack(
+                content, PacketHeader.port_map, 0, 0, 0)
+            n = sock.send(d)
+            assert n == len(d)
+
+        self._workers.append(worker)
+        self._start_thread(worker.main_proc, ())
+
+        return True
 
     def run(self):
         rs = [self._sock]
+        unauth_client = {}
         while True:
             try:
                 _e = None
-                r, _, _ = select.select(rs, [], [], 30)
+                now = time.time()
+                clients = [v[0] for _, v in unauth_client.items()]
+                r, _, _ = select.select(rs + clients, [], [], 10)
+
+                if not r:
+                    for c in clients:
+                        info = unauth_client[c.fileno()]
+                        la = info[2]
+                        ra = info[3]
+
+                        del unauth_client[c.fileno()]
+                        c.close()
+                        logging.error(
+                            "Port Forward Client: %s:%d => %s:%d auth timeout!\n%s",
+                            la[0], la[1], ra[0], ra[1],
+                            traceback.format_exc())
 
                 if self._sock in r:
-                    tunnel_client, ra = self._sock.accept()
-                    # set tcp keepalive
-                    utils.set_keep_alive(tunnel_client)
-                    la = tunnel_client.getsockname()
-                    logging.info(
-                        "Server Forward session: %s:%d => %s:%d opened!",
-                        la[0], la[1], ra[0], ra[1])
-
+                    c, ra = self._sock.accept()
+                    assert (r.index(self._sock) == 0)
+                    del r[0]
                     try:
-                        worker = PortForwardWorker(tunnel_client)
-                        if not worker.setup_map_sock(self._port_map_conf[0]):
-                            tunnel_client.close()
-                            continue
+                        # set tcp keepalive
+                        utils.set_keep_alive(c)
+                        la = c.getsockname()
 
-                        if self._port_map_conf[1]:
-                            # send request port map config
-                            content = json.dumps(
-                                self._port_map_conf[1]).encode()
-                            d = tunnel_packet_pack(
-                                content, PacketHeader.port_map, 0, 0, 0)
-                            n = tunnel_client.send(d)
-                            assert n == len(d)
-
-                        self._workers.append(worker)
-                        self._start_thread(worker.main_proc, ())
+                        if self._server_key:
+                            challenge = self.__gen_challenge()
+                            content = {
+                                "challenge": challenge,
+                                "action": "auth-init"
+                            }
+                            c.send(json.dumps(content).encode())
+                            unauth_client[c.fileno()] = [
+                                c, challenge, la, ra, now]
+                            logging.info(
+                                "Forward Tunnel Client: %s:%d => %s:%d auth start!",
+                                la[0], la[1], ra[0], ra[1])
+                        else:
+                            if not self.__start_worker(c):
+                                raise Exception(
+                                    "Client:%s:%d => %s:%d start failed!",
+                                    la[0], la[1], ra[0], ra[1])
+                            logging.info(
+                                "Forward Tunnel Client: %s:%d => %s:%d opened!",
+                                la[0], la[1], ra[0], ra[1])
                     except:
-                        tunnel_client.close()
-                        logging.error("Port Forward instance exit\n%s",
+                        c.close()
+                        logging.error(
+                            "Port Forward Client initing failed\n%s",
+                            traceback.format_exc())
+
+                for c in r:
+                    assert (self._server_key != None)
+                    info = unauth_client[c.fileno()]
+                    assert (c == info[0])
+                    challenge = info[1]
+                    la = info[2]
+                    ra = info[3]
+                    try:
+                        d = c.recv(2048)
+                        if not d:
+                            raise Exception(
+                                "Client:%s:%d => %s:%d sock closed",
+                                la[0], la[1], ra[0], ra[1])
+
+                        info = json.loads(d.decode())
+                        if type(info) != dict or "auth" not in info:
+                            raise Exception(
+                                "Client:%s:%d => %s:%d auth msg missing!",
+                                la[0], la[1], ra[0], ra[1])
+
+                        auth = hashlib.md5(
+                            (challenge + self._server_key).encode()).hexdigest()[:16]
+                        if info["auth"] != auth:
+                            c.send(json.dumps(
+                                {"action": "auth-faild"}).encode())
+                            raise Exception(
+                                "Client:%s:%d => %s:%d auth failed!",
+                                la[0], la[1], ra[0], ra[1])
+
+                        c.send(json.dumps({"action": "auth-ok"}).encode())
+                        logging.info(
+                            "Forward Tunnel Client: %s:%d => %s:%d auth success!",
+                            la[0], la[1], ra[0], ra[1])
+
+                        if not self.__start_worker(c):
+                            raise Exception(
+                                "Client:%s:%d => %s:%d start failed!",
+                                la[0], la[1], ra[0], ra[1])
+
+                        del unauth_client[c.fileno()]
+                    except:
+                        del unauth_client[c.fileno()]
+                        c.close()
+                        logging.error("Forward Tunnel created faild!\n%s",
                                       traceback.format_exc())
+
             except KeyboardInterrupt:
                 self._sock.close()
                 _e = UserAbort()
@@ -680,20 +778,85 @@ class PortForwardServer(PortForwardBase):
 
 class PortForwardClient(PortForwardBase):
     def __init__(
-            self, tunnel_addr, port_map_conf):
+            self, tunnel_addr, port_map_conf, server_key=None):
         PortForwardBase.__init__(self, port_map_conf)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.connect(tunnel_addr)
+        self._server_key = server_key
+
+    def __do_auth(self):
+        challenge = None
+        la = self._sock.getsockname()
+        ra = self._sock.getpeername()
+        rs = [self._sock]
+        ws = []
+
+        logging.info(
+            "Forward Tunnel Client: %s:%d => %s:%d auth start!",
+            la[0], la[1], ra[0], ra[1])
+        while True:
+            r, w, _ = select.select(rs, ws, [], 10)
+            ws = []
+            if r:
+                d = self._sock.recv(2048)
+                if not d:
+                    raise Exception(
+                        "Client Forward session: %s:%d => %s:%d closed",
+                        la[0], la[1], ra[0], ra[1])
+
+                info = json.loads(d.decode())
+                if type(info) != dict or "action" not in info:
+                    raise Exception(
+                        "Client:%s:%d => %s:%d auth msg missing!",
+                        la[0], la[1], ra[0], ra[1])
+
+                action = info["action"]
+                if action == "auth-init":
+                    if "challenge" not in info:
+                        raise Exception(
+                            "Client:%s:%d => %s:%d auth msg(%s) format error!",
+                            la[0], la[1], ra[0], ra[1], json.dumps(info))
+
+                    challenge = info["challenge"]
+                    ws.append(self._sock)
+                elif action == "auth-ok":
+                    logging.info(
+                        "Forward Tunnel Client: %s:%d => %s:%d auth success!",
+                        la[0], la[1], ra[0], ra[1])
+                    return
+                elif action == "auth-faild":
+                    logging.info(
+                        "Forward Tunnel Client: %s:%d => %s:%d auth faild!",
+                        la[0], la[1], ra[0], ra[1])
+                    raise AuthFailed()
+            if w:
+                if challenge:
+                    auth = hashlib.md5(
+                        (challenge + self._server_key).encode()
+                    ).hexdigest()[:16]
+                    self._sock.send(json.dumps({"auth": auth}).encode())
+
+            if not r and not w:
+                logging.info(
+                    "Forward Tunnel Client: %s:%d => %s:%d auth timeout!",
+                    la[0], la[1], ra[0], ra[1])
+                raise AuthFailed()
 
     def run(self):
         worker = None
         try:
             _e = None
-            # set tcp keepalive
             utils.set_keep_alive(self._sock)
+
             la = self._sock.getsockname()
             ra = self._sock.getpeername()
+
+            if self._server_key:
+                self.__do_auth()
+
+            # set tcp keepalive
+            utils.set_keep_alive(self._sock)
             logging.info(
                 "Client Forward session: %s:%d => %s:%d opened!",
                 la[0], la[1], ra[0], ra[1])
@@ -729,7 +892,8 @@ if __name__ == '__main__':
 
     params = (
         (args.ip, args.port),
-        (args.local_port_map, args.remote_port_map)
+        (args.local_port_map, args.remote_port_map),
+        args.server_key
     )
 
     terminate = False
@@ -782,6 +946,10 @@ if __name__ == '__main__':
             logging.info(
                 "Tunnel offline\n(%s)",
                 traceback.format_exc())
+        except AuthFailed as e:
+            logging.warning(
+                "Port Forward Auth failed!")
+            exit(1)
         except UserAbort as e:
             logging.warning(
                 "Port Forward abort")

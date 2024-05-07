@@ -58,7 +58,9 @@ def parse_args():
     parser.add_argument(
         "--cs-vpn", action='store_true', help="set for local vpn")
     parser.add_argument(
-        "--server", "-s", type=str, default="192.168.20.1", help="server IP")
+        "--server", "-s", type=str, required=True, help="server IP")
+    parser.add_argument(
+        "--server-key", type=str, default=None, help="server authentication key")
     parser.add_argument(
         "--port", "-p", type=int, default=5100,
         help="server port, default 5100")
@@ -369,7 +371,7 @@ class VPN(object):
         logging.info("VPN Server exit!")
 
 
-def waiting_nat_peer_online(instance_id, server, port, user, passwd):
+def waiting_nat_peer_online(instance_id, server, port, server_key, user, passwd):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setblocking(False)
         ws = [s]
@@ -402,13 +404,20 @@ def waiting_nat_peer_online(instance_id, server, port, user, passwd):
                         if challenge != info["challenge"]:
                             ws.append(s)
                             challenge = info["challenge"]
-                    elif "auth-failed" in info:
-                        raise AuthCheckFailed("Passwd check failed!")
+                    elif action == "server-auth-required":
+                        raise AuthCheckFailed("server auth required!")
+                    elif action == "server-auth-failed":
+                        raise AuthCheckFailed("server auth failed!")
+                    elif action == "peer-auth-failed":
+                        raise AuthCheckFailed("peer auth failed!")
                     elif action == "peer-ready":
                         if "token" not in info:
                             raise Exception(
                                 "response format error!(%s)", str(info))
                         return info["token"]
+                    else:
+                        logging.error("Unknow action:%s", action)
+                        continue
 
             if s in w:
                 content = {
@@ -423,6 +432,12 @@ def waiting_nat_peer_online(instance_id, server, port, user, passwd):
                         (user+passwd).encode(),
                         digestmod='md5'
                     ).hexdigest()[:16]
+                    if server_key:
+                        content["server-auth"] = hmac.new(
+                            challenge.encode(),
+                            server_key.encode(),
+                            digestmod='md5'
+                        ).hexdigest()[:16]
                 s.sendto(json.dumps(content).encode(), (server, port))
 
             if not r and not w:
@@ -669,7 +684,8 @@ def setup_p2p_vpn(instance_id):
     logging.info("Waiting peer online...")
     token = waiting_nat_peer_online(
         instance_id, server,
-        args.port, args.user, args.passwd)
+        args.port, args.server_key,
+        args.user, args.passwd)
     logging.info("Begin building NAT-Tunnel...")
     s = nat_tunnel_build(
         instance_id, server, args.port,
