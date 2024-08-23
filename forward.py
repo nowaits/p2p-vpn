@@ -586,6 +586,7 @@ class PortForwardWorker(object):
         for _, m in self._port_maps.items():
             m[0].close()
 
+        del STATS.workers[self.id()]
         logging.info("Forward Worker exit!")
 
 
@@ -611,7 +612,6 @@ class PortForwardBase(object):
         assert self._sock.fileno() == -1
         logging.debug("Port Forward closing!")
         for w in self._workers:
-            del STATS.workers[w.id()]
             w.terminate()
 
         for t in self._threads:
