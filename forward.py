@@ -71,10 +71,10 @@ def parse_args():
         "--port", type=int, default=5100,
         help="agent/server, default 5100")
     parser.add_argument(
-        "--local-port-map", type=parse_maps, default=[],
+        "--local-port-map", action="extend", type=parse_maps, default=[],
         help="local port maps: <tcp/udp>:<local-port0>:<remote-port0>,<tcp/udp>:<local-port1>:<remote-port1>")
     parser.add_argument(
-        "--remote-port-map", type=parse_maps, default=[],
+        "--remote-port-map", action="extend", type=parse_maps, default=[],
         help="remote port maps: <tcp/udp>:<local-port0>:<remote-port0>,<tcp/udp>:<local-port1>:<remote-port1>")
     parser.add_argument(
         "--logfile", type=str, default=None,
