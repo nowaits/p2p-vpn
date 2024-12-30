@@ -93,6 +93,9 @@ class UserAbort(Exception):
 class AuthFailed(Exception):
     pass
 
+class AuthTimeout(Exception):
+    pass
+
 
 class TunnelOffline(Exception):
     pass
@@ -841,7 +844,7 @@ class PortForwardClient(PortForwardBase):
                 logging.info(
                     "Forward Tunnel Client: %s:%d => %s:%d auth timeout!",
                     la[0], la[1], ra[0], ra[1])
-                raise AuthFailed()
+                raise AuthTimeout()
 
     def run(self):
         worker = None
@@ -943,6 +946,10 @@ if __name__ == '__main__':
                 "Port Forward instance exit\n(%s)",
                 traceback.format_exc())
         except TunnelOffline:
+            logging.info(
+                "Tunnel offline\n(%s)",
+                traceback.format_exc())
+        except AuthTimeout:
             logging.info(
                 "Tunnel offline\n(%s)",
                 traceback.format_exc())
