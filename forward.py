@@ -43,15 +43,21 @@ def set_loggint_format(level):
     )
 
 
+TCP_PROTO_ID = 0
+UDP_PROTO_ID = 1
+
+
 def parse_args():
     def str2bool(str):
         return True if str.lower() == 'true' else False
 
     def parse_maps(str):
         m = []
-        protos = {"tcp": socket.SOCK_STREAM, "udp": socket.SOCK_DGRAM}
+        protos = {"tcp": TCP_PROTO_ID, "udp": UDP_PROTO_ID}
         for a in str.split(","):
             p0, p1, p2 = a.split(":")
+            if p0 not in protos:
+                raise Exception("Unknow proto type:%s!", p0)
             m.append((protos[p0], int(p1), int(p2)))
         return m
 
@@ -92,6 +98,7 @@ class UserAbort(Exception):
 
 class AuthFailed(Exception):
     pass
+
 
 class AuthTimeout(Exception):
     pass
@@ -211,9 +218,9 @@ class PortForwardWorker(object):
         added_port_map = []
 
         for p in port_maps_conf:
-            assert p[0] == socket.SOCK_STREAM
+            assert p[0] == TCP_PROTO_ID
             try:
-                s = socket.socket(socket.AF_INET, p[0])
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.setsockopt(socket.SOL_SOCKET,
                              socket.SO_REUSEADDR, 1)
                 s.setblocking(False)
@@ -365,7 +372,7 @@ class PortForwardWorker(object):
                             if k not in clients:
                                 logging.debug(
                                     "No forward session %s %d => %d! %d/%d",
-                                    "tcp" if stype else "udp",
+                                    "tcp" if stype == TCP_PROTO_ID else "udp",
                                     client_port, target_port, l, len(data_buffer))
                                 continue
 
@@ -399,9 +406,11 @@ class PortForwardWorker(object):
                             if k in clients:
                                 continue
 
-                            s = socket.socket(socket.AF_INET, stype)
-                            s.setsockopt(socket.SOL_SOCKET,
-                                         socket.SO_REUSEADDR, 1)
+                            s = socket.socket(
+                                socket.AF_INET,
+                                socket.SOCK_STREAM if stype == TCP_PROTO_ID else socket.SOCK_DGRAM)
+                            s.setsockopt(
+                                socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                             try:
                                 s.connect(("127.0.0.1", target_port))
                             except:
@@ -433,7 +442,7 @@ class PortForwardWorker(object):
                             self._status[STATS.tunnel_to_target_idx] += 1
                             logging.info(
                                 "Forward tunnel -> target session %s %s:%d => %s:%d start!",
-                                "tcp" if stype == socket.SOCK_STREAM else "udp",
+                                "tcp" if stype == TCP_PROTO_ID else "udp",
                                 la[0], la[1], ra[0], ra[1])
                         elif t == PacketHeader.session_destroy:
                             k = "%d-%d-%d" % (stype, client_port, target_port)
