@@ -733,8 +733,7 @@ if __name__ == '__main__':
         except (socket.gaierror, OSError) as e:
             logging.warning("VPN instance exit(%s)", str(e))
         except AuthCheckFailed as e:
-            logging.error("VPN instance exit(%s)", str(e))
-            break
+            logging.warning("VPN instance exit(%s)", str(e))
         except Exception as e:
             logging.error("VPN instance exit\n%s", traceback.format_exc())
             pass
