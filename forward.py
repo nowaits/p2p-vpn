@@ -15,6 +15,7 @@ import hashlib
 
 SCRIPT = os.path.abspath(__file__)
 PWD = os.path.dirname(SCRIPT)
+IS_WIN = sys.platform.startswith("win")
 
 
 assert sys.version_info >= (3, 6)
@@ -45,6 +46,7 @@ def set_loggint_format(level):
 
 TCP_PROTO_ID = 0
 UDP_PROTO_ID = 1
+IP_OPCODE = 0x4e
 
 
 def parse_args():
@@ -106,6 +108,16 @@ class AuthTimeout(Exception):
 
 class TunnelOffline(Exception):
     pass
+
+
+def int_to_ip(ip_int):
+    ip_bytes = struct.pack("!I", ip_int)
+    return socket.inet_ntoa(ip_bytes)
+
+
+def ip_to_int(ip_str):
+    ip_bytes = socket.inet_aton(ip_str)
+    return struct.unpack("!I", ip_bytes)[0]
 
 
 class STATS():
@@ -182,15 +194,21 @@ class PacketHeader():
     session_create = 2
     session_destroy = 3
     port_map = 4
-    # type + proto + client port + target port + len(data len)
-    format = "!BBHHH"
+    # type + proto + client IP + client port + target port + len(data len)
+    format = "!BBIHHH"
     format_size = struct.calcsize(format)
 
 
-def tunnel_packet_pack(p, t, proto, lport, rport):
+def tunnel_packet_pack(p, t, proto, cip, cport, rport):
     return struct.pack(
-        PacketHeader.format, t, proto, lport, rport, len(p)
+        PacketHeader.format, t, proto, cip, cport, rport, len(p)
     ) + p
+
+
+def create_ip_option(ip_int, port):
+    option_type = IP_OPCODE
+    option_length = 8
+    return struct.pack('!BBIH', option_type, option_length, ip_int, port)
 
 
 class PortForwardWorker(object):
@@ -311,10 +329,10 @@ class PortForwardWorker(object):
             logging.info(
                 "Forward %s session %s %s:%d => %s:%d stop!",
                 "client -> tunnel" if info[5] == STATS.client_to_tunnel_idx else "tunnel -> target",
-                "tcp" if info[2] == socket.SOCK_STREAM else "udp",
-                addr[0], addr[1], addr[2], addr[3])
+                "tcp" if info[2] == TCP_PROTO_ID else "udp",
+                int_to_ip(info[3][0]), info[3][1], addr[2], addr[3])
 
-            k = "%d-%d-%d" % (info[2], info[3], info[4])
+            k = "%d-%d-%d" % (info[2], info[3][1], info[4])
             s.close()
             # client info
             del clients[k]
@@ -355,8 +373,9 @@ class PortForwardWorker(object):
 
                     data_buffer += data
                     while len(data_buffer) >= PacketHeader.format_size:
-                        t, stype, client_port, target_port, l = struct.unpack_from(
+                        t, stype, client_addr, client_port, target_port, l = struct.unpack_from(
                             PacketHeader.format, data_buffer)
+                        client_ip = int_to_ip(client_addr)
                         assert l <= STATS.MTU
                         if PacketHeader.format_size + l > len(data_buffer):
                             # logging.debug(
@@ -371,9 +390,9 @@ class PortForwardWorker(object):
                             k = "%d-%d-%d" % (stype, client_port, target_port)
                             if k not in clients:
                                 logging.debug(
-                                    "No forward session %s %d => %d! %d/%d",
+                                    "No forward session %s %s:%d => %d! %d/%d",
                                     "tcp" if stype == TCP_PROTO_ID else "udp",
-                                    client_port, target_port, l, len(data_buffer))
+                                    client_ip, client_port, target_port, l, len(data_buffer))
                                 continue
 
                             s = clients[k][0]
@@ -419,6 +438,11 @@ class PortForwardWorker(object):
                                     target_port, traceback.format_exc())
                                 s.close()
                                 continue
+                            if not IS_WIN:
+                                ip_option = create_ip_option(
+                                    client_addr, client_port)
+                                s.setsockopt(socket.IPPROTO_IP,
+                                            socket.IP_OPTIONS, ip_option)
                             s.setblocking(False)
                             s.settimeout(30)
                             clients[k] = (
@@ -431,7 +455,7 @@ class PortForwardWorker(object):
                             tx_queue = deque()
                             clients_fds[s.fileno()] = (
                                 s, tx_queue, stype,
-                                client_port, target_port, STATS.tunnel_to_target_idx,
+                                (client_addr, client_port), target_port, STATS.tunnel_to_target_idx,
                                 (la[0], la[1], ra[0], ra[1]))
 
                             #
@@ -443,7 +467,7 @@ class PortForwardWorker(object):
                             logging.info(
                                 "Forward tunnel -> target session %s %s:%d => %s:%d start!",
                                 "tcp" if stype == TCP_PROTO_ID else "udp",
-                                la[0], la[1], ra[0], ra[1])
+                                client_ip, client_port, ra[0], ra[1])
                         elif t == PacketHeader.session_destroy:
                             k = "%d-%d-%d" % (stype, client_port, target_port)
                             if k in clients:
@@ -476,6 +500,7 @@ class PortForwardWorker(object):
                     la = s.getsockname()
                     assert la[1] == listen_port_info[1]
 
+                    client_ip = ip_to_int(ra[0])
                     client_port = ra[1]
                     k = "%d-%d-%d" % (
                         listen_port_info[0], client_port, listen_port_info[2])
@@ -484,7 +509,8 @@ class PortForwardWorker(object):
                         s, listen_port_info[0], client_port, listen_port_info[2])
                     clients_fds[s.fileno()] = (
                         s, tx_queue, listen_port_info[0],
-                        client_port, listen_port_info[2], STATS.client_to_tunnel_idx,
+                        (client_ip,
+                         client_port), listen_port_info[2], STATS.client_to_tunnel_idx,
                         (la[0], la[1], ra[0], ra[1]))
 
                     #
@@ -495,13 +521,13 @@ class PortForwardWorker(object):
                     self._status[STATS.client_to_tunnel_idx] += 1
                     p = tunnel_packet_pack(
                         'x'.encode(), PacketHeader.session_create,
-                        listen_port_info[0], client_port, listen_port_info[2])
+                        listen_port_info[0], client_ip, client_port, listen_port_info[2])
                     tunnel_tx_queue.append(p)
                     self.set_pending_write(self._tunnel_sock)
 
                     logging.info(
                         "Forward client -> tunnel session %s %s:%d => %s:%d start!",
-                        "tcp" if listen_port_info[0] == socket.SOCK_STREAM else "udp",
+                        "tcp" if listen_port_info[0] == TCP_PROTO_ID else "udp",
                         la[0], la[1], ra[0], ra[1])
                 elif fid in clients_fds:
                     if len(tunnel_tx_queue) >= 512:
@@ -519,7 +545,7 @@ class PortForwardWorker(object):
                     if not data:
                         p = tunnel_packet_pack(
                             'x'.encode(), PacketHeader.session_destroy,
-                            info[2], info[3], info[4])
+                            info[2], info[3][0], info[3][1], info[4])
                         tunnel_tx_queue.append(p)
 
                         close_client(sock)
@@ -530,7 +556,7 @@ class PortForwardWorker(object):
                     else:
                         p = tunnel_packet_pack(
                             data, PacketHeader.data,
-                            info[2], info[3], info[4])
+                            info[2], info[3][0], info[3][1], info[4])
                         tunnel_tx_queue.append(p)
                         _pkts, _bytes = self.flush_tx(
                             tunnel_tx_queue, self._tunnel_sock)
@@ -664,7 +690,7 @@ class PortForwardServer(PortForwardBase):
             content = json.dumps(
                 self._port_map_conf[1]).encode()
             d = tunnel_packet_pack(
-                content, PacketHeader.port_map, 0, 0, 0)
+                content, PacketHeader.port_map, 0, 0, 0, 0)
             n = sock.send(d)
             assert n == len(d)
 
@@ -881,7 +907,8 @@ class PortForwardClient(PortForwardBase):
             if self._port_map_conf[1]:
                 # send request port map config
                 content = json.dumps(self._port_map_conf[1]).encode()
-                d = tunnel_packet_pack(content, PacketHeader.port_map, 0, 0, 0)
+                d = tunnel_packet_pack(
+                    content, PacketHeader.port_map, 0, 0, 0, 0)
                 n = self._sock.send(d)
                 assert n == len(d)
 
