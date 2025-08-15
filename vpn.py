@@ -195,15 +195,26 @@ class VPN(object):
         logging.info("tun write thread exit!")
 
     def _status(self):
-        index = 0
+        index = -1
+        last_rx = 0
+        last_tx = 0
         while not self._terminate:
             time.sleep(1)
+            index += 1
             r0 = self._rx_rate.format_now()
             r1 = self._tx_rate.format_now()
             a0 = self._rx_rate.format_avg()
             a1 = self._tx_rate.format_avg()
             t0 = self._rx_rate.format_total()
             t1 = self._tx_rate.format_total()
+
+            if last_tx == self._tx_rate.total()[0] and \
+                    last_rx == self._rx_rate.total()[0] and \
+                    index % 300 != 0:
+                continue
+
+            last_tx = self._tx_rate.total()[0]
+            last_rx = self._rx_rate.total()[0]
             logging.info(
                 "Rate(%s) "
                 "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
@@ -211,7 +222,6 @@ class VPN(object):
                     r0[1], a0[1],
                     r1[1], a1[1],
                     t0[1], t1[1]))
-            index += 1
 
         logging.info("status thread exit!")
 

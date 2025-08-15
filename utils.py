@@ -69,10 +69,15 @@ def rate_format_str(rate):
 
 
 def format_time_diff(diff):
-    h = int(diff / 3600)
-    m = int((diff - h * 3600)/60)
-    s = int(diff - h * 3600 - m * 60)
-    return "%03d:%02d:%02d" % (h, m, s)
+    d = int(diff / (3600 * 24))
+    h = int(diff % (3600 * 24) / 3600)
+    m = int(diff % 3600 / 60)
+    s = int(diff % 60)
+
+    if d == 0:
+        return "%02d:%02d:%02d" % (h, m, s)
+
+    return "%d.%02d:%02d:%02d" % (d, h, m, s)
 
 
 def set_keep_alive(sock, after_idle=5, interval=10, max_fails=5):
