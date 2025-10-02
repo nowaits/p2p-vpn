@@ -1,8 +1,3 @@
-'''
-Created on 2018年5月3日
-
-@author: heguofeng
-'''
 import unittest
 import struct
 
@@ -11,18 +6,17 @@ import sys
 import socket
 import time
 from _thread import start_new_thread
-import threading
 import logging
 import os
 import math
 
 if sys.platform.startswith("win"):
-    import winreg as reg
     import win32file
     import pywintypes
     import win32event
+    import wmi
 else:
-    import fcntl  # @UnresolvedImport
+    import fcntl
 
 
 class Packet(object):
@@ -46,24 +40,9 @@ class Packet(object):
         return self.data[16:20]
 
 
-def TunTap(nic_type, nic_name=None):
-    '''
-    TunTap to init a device , after init, you should
-    input:
-        nic_type:  must be "Tun" or "Tap"
-        nic_name:  device name, default is None,
-                    on Linux system if None will auto generate,can be obtained by tap.name
-                    else will reuse the name of given
-                    it is no use on Windows
-
-    return :
-        Tap if linux, WinTap if Windows
-
-    after tap create, can be config(ip,mask),then canbe read or write ,please refer
-
-    '''
+def TunTap(nic_type):
     if not sys.platform.startswith("win"):
-        tap = Tap(nic_type, nic_name)
+        tap = Tap(nic_type)
     else:
         tap = WinTap(nic_type)
     tap.create()
@@ -71,14 +50,8 @@ def TunTap(nic_type, nic_name=None):
 
 
 class Tap(object):
-    '''
-    Linux Tap
-    please use TunTap(nic_type,nic_name) ,it will invoke this class if on linux
-    '''
-
-    def __init__(self, nic_type, nic_name=None):
+    def __init__(self, nic_type):
         self.nic_type = nic_type
-        self.name = nic_name
         self.mac = b"\x00"*6
         self.handle = None
         self.ip = None
@@ -88,42 +61,24 @@ class Tap(object):
 
     def create(self):
         TUNSETIFF = 0x400454ca
-        TUNSETOWNER = 0x400454cc
-        TUNSETGROUP = 0x400454ce
-        TUNSETPERSIST = 0x400454cb
         IFF_TUN = 0x0001
         IFF_TAP = 0x0002
-        IFF_MULTI_QUEUE = 0x0100
         IFF_NO_PI = 0x1000
-        # Open TUN device file.
-        tun = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
-        if not tun:
+        self.handle = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
+        if not self.handle:
             return None
-        # Tall it we want a TUN device named tun0.
         if self.nic_type == "Tap":
             flags = IFF_TAP | IFF_NO_PI
         if self.nic_type == "Tun":
             flags = IFF_TUN | IFF_NO_PI
-        if self.name:
-            ifr_name = self.name.encode() + b'\x00'*(16-len(self.name.encode()))
-        else:
             ifr_name = b'\x00'*16
         ifr = struct.pack('16sH22s', ifr_name, flags, b'\x00'*22)
-        ret = fcntl.ioctl(tun, TUNSETIFF, ifr)
+        ret = fcntl.ioctl(self.handle, TUNSETIFF, ifr)
         dev, _ = struct.unpack('16sH', ret[:18])
         dev = dev.decode().strip("\x00")
         self.name = dev
-        # print(dev)
-        # Optionally, we want it be accessed by the normal user.
-        fcntl.ioctl(tun, TUNSETOWNER, struct.pack("H", 1000))
-        fcntl.ioctl(tun, TUNSETGROUP, struct.pack("H", 1000))
-        fcntl.ioctl(tun, TUNSETPERSIST, struct.pack("B", False))
-        self.handle = tun
-
-        if self.handle:
-            return self
-        else:
-            return None
+        logging.info(f"device {self.name} opened")
+        return self
 
     def _get_maskbits(self, mask):
         masks = mask.split(".")
@@ -138,20 +93,6 @@ class Tap(object):
         return int(maskbits)
 
     def config(self, ip, mask, gateway="0.0.0.0", mtu=1400):
-        '''
-        config device's ip and mask
-
-        input:
-            ip:  ipaddress string, such as "192.168.1.5"
-            mask: netmask string, such as "255.255.255.0"
-            gateway: it is not used in this version
-
-        return :
-            None  if failure
-            self  if success
-
-        after tap configed,then canbe read or write ,please refer
-        '''
         self.ip = ip
         self.mask = mask
         self.gateway = gateway
@@ -168,56 +109,13 @@ class Tap(object):
         return self
 
     def close(self):
-        '''
-        close device
-
-        input:
-            None
-
-        return :
-            None
-
-        '''
-
         self.quitting = False
         os.close(self.handle)
-        try:
-            mode_name = 'tun' if self.nic_type == "Tun" else 'tap'
-            # print('ip tuntap delete mode '+ mode_name + " "+ self.name)
-            subprocess.check_call('ip addr delete '+self.ip+'/%d ' %
-                                  self._get_maskbits(self.mask) + " dev " + self.name, shell=True)
-            subprocess.check_call(
-                'ip tuntap delete mode ' + mode_name + " " + self.name, shell=True)
-
-        except Exception as e:
-            logging.debug(e)
-            pass
-        pass
 
     def read(self, size=1522):
-        '''
-        read device data with given size
-
-        input:
-            size:  read max size , int . such as size = 1500
-
-        return :
-            bytes:
-
-        '''
         return os.read(self.handle, size)
 
     def write(self, data):
-        '''
-        write data to device
-
-        input:
-            data:  byte[] . such as data = b'\x00'*100
-
-        return :
-            int:  writed bytes
-
-        '''
         try:
             return os.write(self.handle, data)
         except:
@@ -225,16 +123,9 @@ class Tap(object):
 
 
 class WinTap(Tap):
-    '''
-    Windows Tap
-    please use TunTap(nic_type,nic_name) ,it will invoke this class if on windows
-    nic_name is useless on windows
-    '''
-
     def __init__(self, nic_type):
         super().__init__(nic_type)
-        self.component_id = "tap0901"
-        self.adapter_key = r'SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}'
+        self._nic = None
         self.TAP_IOCTL_GET_MAC = self._TAP_CONTROL_CODE(1, 0)
         self.TAP_IOCTL_GET_VERSION = self._TAP_CONTROL_CODE(2, 0)
         self.TAP_IOCTL_GET_MTU = self._TAP_CONTROL_CODE(3, 0)
@@ -244,6 +135,7 @@ class WinTap(Tap):
         self.TAP_IOCTL_CONFIG_DHCP_MASQ = self._TAP_CONTROL_CODE(7, 0)
         self.TAP_IOCTL_GET_LOG_LINE = self._TAP_CONTROL_CODE(8, 0)
         self.TAP_IOCTL_CONFIG_DHCP_SET_OPT = self._TAP_CONTROL_CODE(9, 0)
+
         self.TAP_IOCTL_CONFIG_TUN = self._TAP_CONTROL_CODE(10, 0)
 
         self.read_overlapped = pywintypes.OVERLAPPED()
@@ -253,24 +145,6 @@ class WinTap(Tap):
         eventhandle = win32event.CreateEvent(None, True, False, None)
         self.write_overlapped.hEvent = eventhandle
         self.buffer = win32file.AllocateReadBuffer(2000)
-
-    def _get_device_guid(self):
-        with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, self.adapter_key) as adapters:
-            try:
-                for i in range(10000):
-                    key_name = reg.EnumKey(adapters, i)
-                    with reg.OpenKey(adapters, key_name) as adapter:
-                        try:
-                            component_id = reg.QueryValueEx(
-                                adapter, 'ComponentId')[0]
-                            if component_id == self.component_id:
-                                regid = reg.QueryValueEx(
-                                    adapter, 'NetCfgInstanceId')[0]
-                                return regid
-                        except WindowsError as err:
-                            pass
-            except WindowsError as err:
-                pass
 
     def _CTL_CODE(self, device_type, function, method, access):
         return (device_type << 16) | (access << 14) | (function << 2) | method
@@ -286,33 +160,100 @@ class WinTap(Tap):
                 mac_string += "-"
         return mac_string
 
-    def _getNameByMac(self, mac):
-        result = subprocess.check_output(
-            "ipconfig/all", shell=True).decode("gbk").encode().decode()
-        res = result.split("适配器")
-        for i in range(1, len(res)):
-            if res[i].find(self._mac2string(mac)) > 0:
-                return res[i].split(":")[0].strip()
-
     def create(self):
-        guid = self._get_device_guid()
-        self.handle = win32file.CreateFile("\\\\.\\Global\\%s.tap" % guid,
-                                           win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                                           0,  # win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
-                                           None, win32file.OPEN_EXISTING,
-                                           win32file.FILE_ATTRIBUTE_SYSTEM | win32file.FILE_FLAG_OVERLAPPED, None)
-        if self.handle:
-            return self
-        else:
-            return None
+        c = wmi.WMI()
+        devices = []
+        for nic in c.Win32_NetworkAdapter():
+            '''
+            instance of Win32_NetworkAdapter
+            {
+                AdapterType = "以太网 802.3";
+                AdapterTypeId = 0;
+                Availability = 3;
+                Caption = "[00000019] TAP-Windows Adapter V9";
+                ConfigManagerErrorCode = 0;
+                ConfigManagerUserConfig = FALSE;
+                CreationClassName = "Win32_NetworkAdapter";
+                Description = "TAP-Windows Adapter V9";
+                DeviceID = "19";
+                GUID = "{7676C11C-9588-460D-B8A6-53397AF52491}";
+                Index = 19;
+                Installed = TRUE;
+                InterfaceIndex = 13;
+                MACAddress = "00:FF:76:76:C1:1C";
+                Manufacturer = "TAP-Windows Provider V9";
+                MaxNumberControlled = 0;
+                Name = "TAP-Windows Adapter V9";
+                NetConnectionID = "本地连接 2";
+                NetConnectionStatus = 0;
+                NetEnabled = FALSE;
+                PhysicalAdapter = TRUE;
+                PNPDeviceID = "ROOT\\NET\\0001";
+                PowerManagementSupported = FALSE;
+                ProductName = "TAP-Windows Adapter V9";
+                ServiceName = "tap0901";
+                Speed = "1000000000";
+                SystemCreationClassName = "Win32_ComputerSystem";
+                SystemName = "DESKTOP-QPIHHFU";
+                TimeOfLastReset = "20251003095941.500000+480";
+            };
+            '''
+            if nic.ServiceName != "tap0901":
+                continue
+
+            # 手动禁用
+            if nic.ConfigManagerErrorCode == 22:
+                continue
+
+            # 已经使用
+            if nic.NetEnabled:
+                continue
+
+            devices.append(nic)
+
+            try:
+                #
+                # 通过启用dhcp删除已经存在IP，此时设备可能已经被其它设备打开，但是还未配置，可以放心删除IP
+                #
+                subprocess.check_call(
+                    f"netsh interface ip set address name=\"{nic.NetConnectionID}\" dhcp",
+                    shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as e:
+                if e.returncode != 1:  # 已经配置过
+                    raise
+
+        if not devices:
+            return
+
+        for d in devices:
+            self.handle = win32file.CreateFile(
+                "\\\\.\\Global\\%s.tap" % d.GUID,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0, None, win32file.OPEN_EXISTING,
+                win32file.FILE_ATTRIBUTE_SYSTEM | win32file.FILE_FLAG_OVERLAPPED, None)
+            if not self.handle:
+                continue
+
+            self._nic = {
+                "name": d.NetConnectionID,
+                "mac": d.MACAddress,
+            }
+            self.name = self._nic["name"]
+            break
+
+        if not self._nic:
+            raise Exception("not free TAP-Windows Adapter V9 found!")
+
+        logging.info(f"device {self.name} opened")
 
     def config(self, ip, mask, gateway="0.0.0.0", mtu=1400):
         self.ip = ip
         self.mask = mask
         self.gateway = gateway
+
         try:
             code = b'\x01\x00\x00\x00'
-            result = win32file.DeviceIoControl(
+            win32file.DeviceIoControl(
                 self.handle, self.TAP_IOCTL_SET_MEDIA_STATUS, code, 512, None)
             ipnet = struct.pack("I", struct.unpack("I", socket.inet_aton(self.ip))[
                                 0] & struct.unpack("I", socket.inet_aton(self.mask))[0])
@@ -322,25 +263,24 @@ class WinTap(Tap):
                 flag = self.TAP_IOCTL_CONFIG_POINT_TO_POINT
             if self.nic_type == "Tun":
                 flag = self.TAP_IOCTL_CONFIG_TUN
-            result = win32file.DeviceIoControl(
+            win32file.DeviceIoControl(
                 self.handle, flag, ipcode, 16, None)
-            mac = b'0'*6
-            self.mac = win32file.DeviceIoControl(
-                self.handle, self.TAP_IOCTL_GET_MAC, mac, 6, None)
-            self.name = self._getNameByMac(self.mac)
         except Exception as exp:
             logging.debug(exp)
             win32file.CloseHandle(self.handle)
 
-        sargs = r"netsh interface ip set address name=NAME source=static addr=ADDRESS mask=MASK gateway=GATEWAY"
-        sargs = sargs.replace("NAME", "\"%s\"" % self.name)
-        sargs = sargs.replace("ADDRESS", self.ip)
-        sargs = sargs.replace("MASK", self.mask)
-        if self.gateway == "0.0.0.0":
-            sargs = sargs.replace("gateway=GATEWAY", "")
-        else:
-            sargs = sargs.replace("GATEWAY", self.gateway)
-        subprocess.check_call(sargs, shell=True)
+        cmd = f"netsh interface ip set address name=\"{self.name}\" source=static addr={self.ip} mask={self.mask}"
+
+        if self.gateway != "0.0.0.0":
+            cmd += " gateway={self.gateway}"
+        try:
+            subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            if e.returncode != 1:  # 忽略已存在警告
+                raise
+
+        cmd = f"netsh interface ipv4 set subinterface \"{self.name}\" mtu={mtu} store=persistent"
+        subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def read(self, size=1522):
         try:
@@ -375,7 +315,6 @@ class WinTap(Tap):
 class Test(unittest.TestCase):
 
     def setUp(self):
-
         pass
 
     def tearDown(self):
@@ -396,7 +335,7 @@ class Test(unittest.TestCase):
             print('packet:', "".join('{:02x} '.format(x) for x in packet.data))
 
     def testTap(self):
-        tap = TunTap(nic_type="Tap", nic_name="tap0")
+        tap = TunTap(nic_type="Tap")
         tap.config("192.168.2.82", "255.255.255.0")
         print(tap.name)
         start_new_thread(self.readtest, (tap,))
@@ -407,7 +346,7 @@ class Test(unittest.TestCase):
         pass
 
     def testTun(self):
-        tap = TunTap(nic_type="Tun", nic_name="tun0")
+        tap = TunTap(nic_type="Tun")
         tap.config("192.168.2.82", "255.255.255.0")
         print(tap.name)
         start_new_thread(self.readtest, (tap,))

@@ -5,12 +5,13 @@
 #### 依赖
 
 - python: `>=3.6`
-    - windows平台win32运行时:`pip install pywin32`
+    - windows平台win32运行时:`pip install pywin32 wmi`
 - format: `pip3 install autopep8`
     - `autopep8 -i <xxx>.py`
 - windows tap网卡安装： [Tap-Windows Adapter V9](https://github.com/OpenVPN/tap-windows6/)
     1. [github下载依赖](https://github.com/OpenVPN/tap-windows6/releases/download/9.26.0/dist.win7.zip)
     2. 解压并安装:`tapinstall.exe install OemVista.inf tap0901`
+        - 注意：`需要多网卡支持时，重复执行上述命令`
 
 ### 启动
 

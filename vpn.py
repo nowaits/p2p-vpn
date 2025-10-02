@@ -132,7 +132,7 @@ def vpn_packet_unpack(p):
 class VPN(object):
 
     def __init__(self, tun, sock, show_status):
-        self._tun = TunTap(nic_type="Tun", nic_name="tun0")
+        self._tun = TunTap(nic_type="Tun")
         self._tun.config(tun[0], tun[1], mtu=tun[2])
         assert sock != None
         self._sock = sock
