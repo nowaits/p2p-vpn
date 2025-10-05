@@ -282,17 +282,27 @@ class VPN(object):
                         self._last_recv_data_time = now
                         need_send_heart = False
                     elif t == PacketHeader.heartbeat:
-                        self._last_recv_data_time = now
-                        need_send_heart = False
-                        need_send_heart_ack = True
-                        ws.append(self._sock)
-                        # logging.info("Heartbeat recv:%s", str(p))
+                        h = p.decode().split(":")
+                        if len(h) == 3:
+                            if h[0] != instance_id:
+                                self._last_recv_data_time = now
+                                need_send_heart = False
+                                need_send_heart_ack = True
+                                ws.append(self._sock)
+                                logging.debug("Heartbeat recv:%s", p.decode())
+                            else:
+                                logging.warning("Heartbeat recv:%s from self", p.decode())
                         pass
                     elif t == PacketHeader.heartbeat_ack:
-                        self._last_recv_data_time = now
-                        need_send_heart = False
-                        need_send_heart_ack = False
-                        # logging.info("Heartbeat ack:%s", str(p))
+                        h = p.decode().split(":")
+                        if len(h) == 3:
+                            if h[0] != instance_id:
+                                self._last_recv_data_time = now
+                                need_send_heart = False
+                                need_send_heart_ack = False
+                                logging.debug("Heartbeat ack:%s", p.decode())
+                            else:
+                                logging.warning("Heartbeat ack:%s from self", p.decode())
                         pass
                     elif t == PacketHeader.control:
                         logging.warning(
@@ -332,26 +342,26 @@ class VPN(object):
 
                 if need_send_heart:
                     if self._sock in w:
-                        content = '%d:%f' % (heartbeat_seq_no, now)
+                        content = '%s:%d:%f' % (instance_id, heartbeat_seq_no, now)
                         d = vpn_packet_pack(
                             content.encode(), PacketHeader.heartbeat)
                         self._sock.send(d)
                         need_send_heart = False
                         heartbeat_seq_no += 1
                         w.remove(self._sock)
-                        logging.debug("Send heartbeat")
+                        logging.debug("Send heartbeat: %s", content)
                     else:
                         ws.append(self._sock)
 
                 if need_send_heart_ack:
                     if self._sock in w:
-                        content = '%d:%f' % (heartbeat_seq_no, now)
+                        content = '%s:%d:%f' % (instance_id, heartbeat_seq_no, now)
                         d = vpn_packet_pack(
                             content.encode(), PacketHeader.heartbeat_ack)
                         self._sock.send(d)
                         need_send_heart_ack = False
                         w.remove(self._sock)
-                        logging.debug("Send heartbeat ack")
+                        logging.debug("Send heartbeat ack: %s", content)
                     else:
                         ws.append(self._sock)
 
@@ -495,13 +505,15 @@ def nat_tunnel_build(
                 continue
 
             peer_addr = (info["addr"], int(info["port"]))
+            self_addr = (info["addr-self"], int(info["port-self"]))
             if not request_forward:
-                logging.info("Get peer addr: %s:%d",
-                             peer_addr[0], peer_addr[1])
+                logging.info(
+                    "Get addr %s:%d=>%s:%d ok",
+                    self_addr[0], self_addr[1], peer_addr[0], peer_addr[1])
             else:
                 logging.info(
-                    "Forward tunnel with peer addr: %s:%d ok!",
-                    peer_addr[0], peer_addr[1])
+                    "Forward tunnel %s:%d=>%s:%d ok",
+                    self_addr[0], self_addr[1], peer_addr[0], peer_addr[1])
                 s.connect((server, port))
                 return s
 
@@ -524,10 +536,19 @@ def nat_tunnel_build(
             ws.append(s)
 
     local = s.getsockname()
+
+    # 2. check is nat hairpin
+    if self_addr[0] == peer_addr[0]:
+        s.connect(peer_addr)
+        logging.info(
+            "Nat-hairpin tunnel %s:%d=>%s:%d ok",
+            local[0], local[1], peer_addr[0], peer_addr[1])
+        return s
+
+    # 3. build tunnel
     logging.info("Try to build UDP tunnel(%s:%d=>%s:%d)" % (
         local[0], local[1], peer_addr[0], peer_addr[1]))
 
-    # 2. build tunnel
     port_offset0 = 0
     port_offset1 = 0
     sign0 = 1
@@ -692,7 +713,7 @@ def setup_p2p_vpn(instance_id):
     server = socket.gethostbyname(args.server)
 
     # do waiting peer online
-    logging.info("Waiting peer online...")
+    logging.info("Instance %s Waiting peer online...", instance_id)
     token = waiting_nat_peer_online(
         instance_id, server,
         args.port, args.server_key,

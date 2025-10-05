@@ -308,7 +308,9 @@ class VPNRelay(object):
             # send peer info
             peer_info = {
                 "addr": peer[0], "port": peer[1],
-                "time": now
+                "time": now,
+                "addr-self": addr[0],
+                "port-self": addr[1],
             }
             s.sendto(json.dumps(peer_info).encode(), addr)
 
