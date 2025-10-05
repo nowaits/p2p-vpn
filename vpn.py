@@ -257,6 +257,11 @@ class VPN(object):
                 ws = []
                 now = time.time()
 
+                if now - self._last_recv_data_time > 30:
+                    logging.error("Heartbeat timeout!")
+                    self._terminate = True
+                    break
+
                 if not r and not w:
                     #
                     # request heartbeat if no recv data
@@ -266,10 +271,6 @@ class VPN(object):
                     #
                     need_send_heart = True
                     ws.append(self._sock)
-
-                    if now - self._last_recv_data_time > 30:
-                        logging.error("Heartbeat timeout!")
-                        self._terminate = True
                     continue
 
                 if self._sock in r:
