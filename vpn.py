@@ -15,6 +15,7 @@ import logging
 import json
 import traceback
 import hmac
+import hashlib
 
 assert sys.version_info >= (3, 6)
 
@@ -291,7 +292,8 @@ class VPN(object):
                                 ws.append(self._sock)
                                 logging.debug("Heartbeat recv:%s", p.decode())
                             else:
-                                logging.warning("Heartbeat recv:%s from self", p.decode())
+                                logging.warning(
+                                    "Heartbeat recv:%s from self", p.decode())
                         pass
                     elif t == PacketHeader.heartbeat_ack:
                         h = p.decode().split(":")
@@ -302,10 +304,11 @@ class VPN(object):
                                 need_send_heart_ack = False
                                 logging.debug("Heartbeat ack:%s", p.decode())
                             else:
-                                logging.warning("Heartbeat ack:%s from self", p.decode())
+                                logging.warning(
+                                    "Heartbeat ack:%s from self", p.decode())
                         pass
                     elif t == PacketHeader.control:
-                        logging.warning(
+                        logging.debug(
                             "VPN Packet control message: %s", p.decode())
                     elif t == PacketHeader.invalid_type:
                         logging.warning("VPN Packet type invalid!")
@@ -342,26 +345,26 @@ class VPN(object):
 
                 if need_send_heart:
                     if self._sock in w:
-                        content = '%s:%d:%f' % (instance_id, heartbeat_seq_no, now)
+                        content = f"{instance_id}:{heartbeat_seq_no}:{now}"
                         d = vpn_packet_pack(
                             content.encode(), PacketHeader.heartbeat)
                         self._sock.send(d)
                         need_send_heart = False
                         heartbeat_seq_no += 1
                         w.remove(self._sock)
-                        logging.debug("Send heartbeat: %s", content)
+                        logging.debug(f"Send heartbeat: {content}")
                     else:
                         ws.append(self._sock)
 
                 if need_send_heart_ack:
                     if self._sock in w:
-                        content = '%s:%d:%f' % (instance_id, heartbeat_seq_no, now)
+                        content = f"{instance_id}:{heartbeat_seq_no}:{now}"
                         d = vpn_packet_pack(
                             content.encode(), PacketHeader.heartbeat_ack)
                         self._sock.send(d)
                         need_send_heart_ack = False
                         w.remove(self._sock)
-                        logging.debug("Send heartbeat ack: %s", content)
+                        logging.debug(f"Send heartbeat ack: {content}")
                     else:
                         ws.append(self._sock)
 
@@ -557,48 +560,83 @@ def nat_tunnel_build(
     start_time = time.time()
     ws = [s]
     select_timeout = 0.1
+    send_tag = hashlib.md5((user + peer_addr[0]).encode()).hexdigest()[:16]
+    recv_tag = hashlib.md5((user + self_addr[0]).encode()).hexdigest()[:16]
+
+    recv_req_ok=False
+    ack_time = 10 # 收到req之后继续再发送10次，确保对方能收到resp消息
     while True:
         r, w, _ = select.select([s], ws, [], select_timeout)
         ws = []
 
         if s in r:
             data, addr = s.recvfrom(2048)
-            if addr[0] == peer_addr[0]:
-                s.connect(addr)
-                logging.info("Tunnel ok! peer: %s:%d try times:%d",
-                             addr[0], addr[1], try_times)
-                return s
+            try:
+                t, d = vpn_packet_unpack(data)
+                if t == PacketHeader.control:
+                    ds = d.decode().split(":")
+                    if len(ds) == 3 and ds[0] == recv_tag and addr[0] == peer_addr[0]:
+                        s.connect(addr)
+                        if ds[1] == "nat-req":
+                            recv_req_ok = True
+                            logging.info(
+                                f"Tunnel req from {addr[0]}:{addr[1]} try times:{try_times}")
+                        elif ds[1] == "nat-resp":
+                            logging.info(
+                                f"Tunnel ok! peer:{addr[0]}:{addr[1]} try times:{try_times}")
+                            return s
+                        else:
+                            logging.warning(f"Unknow tunnel msg: {d}")
+                    else:
+                        logging.warning(f"Invalid control msg: {d}")
+                else:
+                    logging.warning(f"Invalid packet:{data}")
+            except Exception as e:
+                pass
 
         if s in w:
-            try_times += 1
-            l = int(32 * random.random() + 1)
-            content = utils.random_str(l).encode()
-            s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset0))
-            s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset1))
-            if False:
-                port_offset0 = int(
-                    port_try_range *
-                    random.random() - port_try_range/2)
-                port_offset1 = int(
-                    port_try_range *
-                    random.random() - port_try_range/2)
-            else:
-                port_offset0 += sign0
-                port_offset1 += sign1
-                if port_offset0 > port_try_range/2 or peer_addr[1] + port_offset0 == 65536:
-                    sign0 = -1
-                elif port_offset0 < -port_try_range/2 or peer_addr[1] + port_offset0 == 1:
-                    sign0 = 1
-                if port_offset1 > port_try_range/2 or peer_addr[1] + port_offset1 == 65536:
-                    sign1 = -1
-                elif port_offset1 < -port_try_range/2 or peer_addr[1] + port_offset1 == 1:
-                    sign1 = 1
-            logging.debug(
-                "try next port(%d): %s:(%d,%d)", try_times,
-                peer_addr[0],
-                peer_addr[1] + port_offset0,
-                peer_addr[1] + port_offset1)
+            if not recv_req_ok:
+                try_times += 1
+                l = int(32 * random.random() + 1)
 
+                content = vpn_packet_pack(
+                    (send_tag + ":nat-req:" + utils.random_str(l)).encode(),
+                    PacketHeader.control)
+                s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset0))
+                s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset1))
+                if False:
+                    port_offset0 = int(
+                        port_try_range *
+                        random.random() - port_try_range/2)
+                    port_offset1 = int(
+                        port_try_range *
+                        random.random() - port_try_range/2)
+                else:
+                    port_offset0 += sign0
+                    port_offset1 += sign1
+                    if port_offset0 > port_try_range/2 or peer_addr[1] + port_offset0 == 65536:
+                        sign0 = -1
+                    elif port_offset0 < -port_try_range/2 or peer_addr[1] + port_offset0 == 1:
+                        sign0 = 1
+                    if port_offset1 > port_try_range/2 or peer_addr[1] + port_offset1 == 65536:
+                        sign1 = -1
+                    elif port_offset1 < -port_try_range/2 or peer_addr[1] + port_offset1 == 1:
+                        sign1 = 1
+                logging.debug(
+                    "try next port(%d): %s:(%d,%d)", try_times,
+                    peer_addr[0],
+                    peer_addr[1] + port_offset0,
+                    peer_addr[1] + port_offset1)
+            else:
+                l = int(32 * random.random() + 1)
+                content = vpn_packet_pack(
+                    (send_tag + ":nat-resp:" + utils.random_str(l)).encode(),
+                    PacketHeader.control)
+                s.send(content)
+                ack_time -= 1
+                if ack_time == 0:
+                    logging.info(f"Tunnel ok! peer:{addr[0]}:{addr[1]}")
+                    return s
             if not r:
                 t = random.random() / 5
                 select_timeout = t
@@ -607,7 +645,7 @@ def nat_tunnel_build(
             ws.append(s)
 
         if time.time() - start_time > timeout:
-            logging.error("Build udp tunnel timeout!(try times:%d)", try_times)
+            logging.error(f"Build udp tunnel timeout!(try times:{try_times})")
             break
     s.close()
     return None
@@ -657,11 +695,9 @@ def setup_cs_vpn(instance_id):
                 time.sleep(0.5)
 
     if not args.client:
-        logging.info("connect server: %s:%d ok" %
-                     (peer[0], peer[1]))
+        logging.info(f"connect server: {peer[0]}:{peer[1]} ok")
     else:
-        logging.info("client connect: %s:%d ok" %
-                     (peer[0], peer[1]))
+        logging.info(f"client connect: {peer[0]}:{peer[1]} ok")
     tun = (args.vip, args.vmask, args.mtu)
     with VPN(tun, s, args.show_status) as v:
         v.run()
