@@ -5,6 +5,11 @@ import random
 import hashlib
 import uuid
 import socket
+import platform
+import subprocess
+import re
+import ipaddress
+import select
 
 
 def random_str(l):
@@ -100,6 +105,122 @@ def set_keep_alive(sock, after_idle=5, interval=10, max_fails=5):
         return True
     else:
         return False
+
+
+def get_all_ipv4(include_loopback=False):
+    """返回系统所有 IPv4 地址及前缀长度，例如：
+       [("192.168.1.10", 24), ("10.0.0.5", 8)]
+    """
+    results = []
+    system = platform.system().lower()
+
+    if system == "windows":
+        out = subprocess.run(["ipconfig"], capture_output=True,
+                             text=True, errors="ignore").stdout
+        pairs = re.findall(
+            r"IPv4[^\:]*:\s*([\d\.]+).*?(?:子网掩码|Subnet Mask)[^\:]*:\s*([\d\.]+)",
+            out, re.IGNORECASE | re.DOTALL
+        )
+        for ip, mask in pairs:
+            if not include_loopback and ip.startswith("127."):
+                continue
+            plen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+            results.append((ip, plen))
+
+    else:
+        try:
+            out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                                 capture_output=True, text=True, errors="ignore").stdout
+            for ip, plen in re.findall(r"inet\s+([\d\.]+)/(\d+)", out):
+                if not include_loopback and ip.startswith("127."):
+                    continue
+                results.append((ip, int(plen)))
+        except FileNotFoundError:
+            out = subprocess.run(
+                ["ifconfig"], capture_output=True, text=True, errors="ignore").stdout
+            for ip, mask in re.findall(r"inet\s+(?:addr:)?([\d\.]+).*?(?:Mask:|netmask\s+)([\d\.x]+)", out, re.IGNORECASE):
+                if not include_loopback and ip.startswith("127.") or not mask:
+                    continue
+                if "0x" in mask:
+                    mask = str(ipaddress.IPv4Address(int(mask, 16)))
+                plen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+                results.append((ip, plen))
+
+    return results
+
+
+def check_ip_with_plen_equal(ip0, ip1, plen):
+    net0 = ipaddress.IPv4Network(f"{ip0}/{plen}", strict=False)
+    net1 = ipaddress.IPv4Network(f"{ip1}/{plen}", strict=False)
+    return net0.network_address == net1.network_address
+
+
+def probe_ip_in_lan(local_port, remote_port, local_is_server):
+    '''
+    使用UDP广播探测两个主机一个局域网下是否互通
+    '''
+    local_ips = get_all_ipv4()
+    ss = {}
+
+    if local_is_server:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("0.0.0.0", local_port))
+        s.setblocking(False)
+        ss[s.fileno()] = s
+    else:
+        for ip, _ in local_ips:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.bind((ip, local_port))
+            s.setblocking(False)
+            ss[s.fileno()] = s
+
+    ws = ss.values()
+    addr_pair = {}
+    start_time = time.time()
+
+    msg = "tunnel-building".encode()
+    resp_time = 0
+    while time.time() < start_time + 5 and resp_time < 3:
+        r, w, _ = select.select(ss.values(), ws, [], 0.5)
+        ws = []
+
+        for s in r:
+            data, addr = s.recvfrom(1024)
+
+            if data != msg:
+                continue
+
+            resp_time += 1
+            if addr[0] not in addr_pair:
+                for ip, plen in local_ips:
+                    if check_ip_with_plen_equal(ip, addr[0], plen):
+                        addr_pair[addr[0]] = ip
+
+            if local_is_server:
+                s.sendto(msg, addr)
+
+        if not local_is_server:
+            for s in w:
+                try:
+                    s.sendto(msg, ('255.255.255.255', remote_port))
+                except:
+                    del ss[s.fileno()]
+                    s.close()
+
+        if not r and not w:
+            ws = ss.values()
+
+    for s in ss.values():
+        s.close()
+
+    if addr_pair:
+        k = sorted(addr_pair)[0]  # 返回排序最小的一个
+        return addr_pair[k], k
+    else:
+        return None, None
 
 
 class Rate(object):

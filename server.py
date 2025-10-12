@@ -263,8 +263,12 @@ class VPNRelay(object):
                 del self._clients[user]
                 continue
 
+            if "local-addr" not in info:
+                logging.info("Recv data: %s missing key:local-addr", str(info))
+                continue
+
             instance[instance_id] = (
-                addr[0], addr[1], now, instance_id
+                addr, info["local-addr"], now, instance_id
             )
 
             # 1. remove timeout
@@ -291,25 +295,27 @@ class VPNRelay(object):
                 assert k == "%s:%d" % (addr[0], addr[1])
                 logging.info(
                     "add forward table: %s:%d => %s:%d",
-                    addr[0], addr[1], peer[0], peer[1])
-                peer_k = "%s:%d" % (peer[0], peer[1])
+                    addr[0], addr[1], peer[0][0], peer[0][1])
+                peer_k = "%s:%d" % (peer[0][0], peer[0][1])
 
                 if peer_k in self._forward_table:
                     assert self._forward_table[peer_k][0][0] == addr[0]
 
                     self._forward_table[peer_k] = [addr, True, now]
-                    self._forward_table[k] = [(peer[0], peer[1]), True, now]
+                    self._forward_table[k] = [
+                        (peer[0][0], peer[0][1]), True, now]
                     # NOTE: client记录已经无效，触发记录删除
                     client["time"] -= self._client_record_timeout
                 else:
-                    self._forward_table[k] = [(peer[0], peer[1]), False, now]
+                    self._forward_table[k] = [
+                        (peer[0][0], peer[0][1]), False, now]
 
             # send peer info
             peer_info = {
-                "addr": peer[0], "port": peer[1],
+                "peer-public-addr": peer[0],
+                "peer-local-addr": peer[1],
                 "time": now,
-                "addr-self": addr[0],
-                "port-self": addr[1],
+                "public-addr": addr,
             }
             s.sendto(json.dumps(peer_info).encode(), addr)
 

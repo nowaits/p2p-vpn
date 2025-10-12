@@ -473,12 +473,14 @@ def nat_tunnel_build(
         user, token, timeout, request_forward=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setblocking(False)
+    s.bind(("0.0.0.0", 0))  # 绑定一个本地地址和随机端口
+    local = s.getsockname()
 
     # 1. get peer addr
-    peer_addr = None
+    peer_public_addr = None
     start_time = time.time()
     ws = [s]
-    while not peer_addr:
+    while not peer_public_addr:
         r, w, _ = select.select([s], ws, [], 0.5)
         ws = []
 
@@ -498,7 +500,7 @@ def nat_tunnel_build(
 
             logging.debug("Resp:%s from server", str(info))
             key_missing = False
-            for k in ["addr", "port"]:
+            for k in ["peer-public-addr", "peer-local-addr", "public-addr"]:
                 if k not in info:
                     key_missing = True
                     logging.error("Resp:%s missing key:%s!", str(info), k)
@@ -507,16 +509,17 @@ def nat_tunnel_build(
             if key_missing:
                 continue
 
-            peer_addr = (info["addr"], int(info["port"]))
-            self_addr = (info["addr-self"], int(info["port-self"]))
+            peer_public_addr = info["peer-public-addr"]
+            peer_local_addr = info["peer-local-addr"]
+            public_addr = info["public-addr"]
             if not request_forward:
                 logging.info(
                     "Get addr %s:%d=>%s:%d ok",
-                    self_addr[0], self_addr[1], peer_addr[0], peer_addr[1])
+                    public_addr[0], public_addr[1], peer_public_addr[0], peer_public_addr[1])
             else:
                 logging.info(
                     "Forward tunnel %s:%d=>%s:%d ok",
-                    self_addr[0], self_addr[1], peer_addr[0], peer_addr[1])
+                    public_addr[0], public_addr[1], peer_public_addr[0], peer_public_addr[1])
                 s.connect((server, port))
                 return s
 
@@ -526,8 +529,8 @@ def nat_tunnel_build(
                 "instance_id": instance_id,
                 "token": token,
                 "action": "peer-info" if not request_forward else "request-forward",
+                "local-addr": local
             }
-
             s.sendto(json.dumps(content).encode(), (server, port))
 
         if time.time() - start_time > timeout:
@@ -538,19 +541,35 @@ def nat_tunnel_build(
         if not r and not w:
             ws.append(s)
 
-    local = s.getsockname()
+    # 2. NAT-HAIRPIN
+    if not request_forward and public_addr[0] == peer_public_addr[0]:
+        # 2.1 check in save LAN
+        port_local = local[1]
+        port_remote = peer_local_addr[1]
+        is_server = port_local > port_remote and public_addr[1] > peer_public_addr[1]
 
-    # 2. check is nat hairpin
-    if self_addr[0] == peer_addr[0]:
-        s.connect(peer_addr)
-        logging.info(
-            "Nat-hairpin tunnel %s:%d=>%s:%d ok",
-            local[0], local[1], peer_addr[0], peer_addr[1])
+        s.close()  # 让出本地端口，探测完重新创建
+        logging.info(f"Checking peer={peer_public_addr} in same LAN...")
+        local_ip, remote_ip = utils.probe_ip_in_lan(
+            port_local, port_remote, is_server)
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setblocking(False)
+        if local_ip and remote_ip:
+            s.bind((local_ip, port_local))
+            s.connect((remote_ip, port_remote))
+            logging.info(
+                f"LAN tunnel {local_ip}:{port_local}=>{remote_ip}:{port_remote} ok")
+        else:
+            s.bind(("0.0.0.0", port_local))
+            s.connect(tuple(peer_public_addr))
+            logging.info(
+                f"Nat-hairpin tunnel {local[0]}:{local[1]}=>{peer_public_addr[0]}:{peer_public_addr[1]} ok")
         return s
 
     # 3. build tunnel
-    logging.info("Try to build UDP tunnel(%s:%d=>%s:%d)" % (
-        local[0], local[1], peer_addr[0], peer_addr[1]))
+    logging.info(
+        f"Try to build UDP tunnel {local[0]}:{local[1]}=>{peer_public_addr[0]}:{peer_public_addr[1]}")
 
     port_offset0 = 0
     port_offset1 = 0
@@ -560,11 +579,12 @@ def nat_tunnel_build(
     start_time = time.time()
     ws = [s]
     select_timeout = 0.1
-    send_tag = hashlib.md5((user + peer_addr[0]).encode()).hexdigest()[:16]
-    recv_tag = hashlib.md5((user + self_addr[0]).encode()).hexdigest()[:16]
+    send_tag = hashlib.md5(
+        (user + peer_public_addr[0]).encode()).hexdigest()[:16]
+    recv_tag = hashlib.md5((user + public_addr[0]).encode()).hexdigest()[:16]
 
-    recv_req_ok=False
-    ack_time = 10 # 收到req之后继续再发送10次，确保对方能收到resp消息
+    recv_req_ok = False
+    ack_time = 10  # 收到req之后继续再发送10次，确保对方能收到resp消息
     while True:
         r, w, _ = select.select([s], ws, [], select_timeout)
         ws = []
@@ -575,7 +595,7 @@ def nat_tunnel_build(
                 t, d = vpn_packet_unpack(data)
                 if t == PacketHeader.control:
                     ds = d.decode().split(":")
-                    if len(ds) == 3 and ds[0] == recv_tag and addr[0] == peer_addr[0]:
+                    if len(ds) == 3 and ds[0] == recv_tag and addr[0] == peer_public_addr[0]:
                         s.connect(addr)
                         if ds[1] == "nat-req":
                             recv_req_ok = True
@@ -589,8 +609,10 @@ def nat_tunnel_build(
                             logging.warning(f"Unknow tunnel msg: {d}")
                     else:
                         logging.warning(f"Invalid control msg: {d}")
+                elif t < PacketHeader.invalid_type:
+                    logging.debug(f"skip tunnel packet:{t} {d}")
                 else:
-                    logging.warning(f"Invalid packet:{data}")
+                    logging.warning(f"Invalid packet:{t} {d}")
             except Exception as e:
                 pass
 
@@ -602,8 +624,10 @@ def nat_tunnel_build(
                 content = vpn_packet_pack(
                     (send_tag + ":nat-req:" + utils.random_str(l)).encode(),
                     PacketHeader.control)
-                s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset0))
-                s.sendto(content, (peer_addr[0], peer_addr[1] + port_offset1))
+                s.sendto(
+                    content, (peer_public_addr[0], peer_public_addr[1] + port_offset0))
+                s.sendto(
+                    content, (peer_public_addr[0], peer_public_addr[1] + port_offset1))
                 if False:
                     port_offset0 = int(
                         port_try_range *
@@ -614,19 +638,19 @@ def nat_tunnel_build(
                 else:
                     port_offset0 += sign0
                     port_offset1 += sign1
-                    if port_offset0 > port_try_range/2 or peer_addr[1] + port_offset0 == 65536:
+                    if port_offset0 > port_try_range/2 or peer_public_addr[1] + port_offset0 == 65536:
                         sign0 = -1
-                    elif port_offset0 < -port_try_range/2 or peer_addr[1] + port_offset0 == 1:
+                    elif port_offset0 < -port_try_range/2 or peer_public_addr[1] + port_offset0 == 1:
                         sign0 = 1
-                    if port_offset1 > port_try_range/2 or peer_addr[1] + port_offset1 == 65536:
+                    if port_offset1 > port_try_range/2 or peer_public_addr[1] + port_offset1 == 65536:
                         sign1 = -1
-                    elif port_offset1 < -port_try_range/2 or peer_addr[1] + port_offset1 == 1:
+                    elif port_offset1 < -port_try_range/2 or peer_public_addr[1] + port_offset1 == 1:
                         sign1 = 1
                 logging.debug(
                     "try next port(%d): %s:(%d,%d)", try_times,
-                    peer_addr[0],
-                    peer_addr[1] + port_offset0,
-                    peer_addr[1] + port_offset1)
+                    peer_public_addr[0],
+                    peer_public_addr[1] + port_offset0,
+                    peer_public_addr[1] + port_offset1)
             else:
                 l = int(32 * random.random() + 1)
                 content = vpn_packet_pack(
@@ -799,9 +823,9 @@ if __name__ == '__main__':
                 # 恢复计数
                 fail_try_time = 0
         except (socket.gaierror, OSError) as e:
-            logging.warning("VPN instance exit(%s)", str(e))
+            logging.warning("VPN instance exit(%s)", traceback.format_exc())
         except AuthCheckFailed as e:
-            logging.warning("VPN instance exit(%s)", str(e))
+            logging.warning("VPN instance exit(%s)", traceback.format_exc())
         except Exception as e:
             logging.error("VPN instance exit\n%s", traceback.format_exc())
             pass
