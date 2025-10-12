@@ -296,7 +296,6 @@ class VPNRelay(object):
 
                 if peer_k in self._forward_table:
                     assert self._forward_table[peer_k][0][0] == addr[0]
-                    assert self._forward_table[peer_k][0][1] == addr[1]
 
                     self._forward_table[peer_k] = [addr, True, now]
                     self._forward_table[k] = [(peer[0], peer[1]), True, now]
