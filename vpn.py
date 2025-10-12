@@ -86,6 +86,8 @@ def parse_args():
     parser.add_argument("--user", type=str, help="user account")
     parser.add_argument("--passwd", type=str, help="user passwd")
     parser.add_argument(
+        "--disable-nat-hairpin", action='store_true', help="disable nat hairpin")
+    parser.add_argument(
         "--run-as-service", action='store_true', help="run as vpn service")
     parser.add_argument(
         "--p2p-test", action='store_true', help="test p2p throughout")
@@ -470,7 +472,7 @@ def waiting_nat_peer_online(instance_id, server, port, server_key, user, passwd)
 
 def nat_tunnel_build(
         instance_id, server, port, port_try_range,
-        user, token, timeout, request_forward=False):
+        user, token, timeout, disable_nat_hairpin=False, request_forward=False):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setblocking(False)
     s.bind(("0.0.0.0", 0))  # 绑定一个本地地址和随机端口
@@ -549,7 +551,8 @@ def nat_tunnel_build(
         is_server = port_local > port_remote and public_addr[1] > peer_public_addr[1]
 
         s.close()  # 让出本地端口，探测完重新创建
-        logging.info(f"Checking peer={peer_public_addr} in same LAN...")
+        logging.info(
+            f"Checking peer={peer_public_addr[0]}:{peer_public_addr[1]} in same LAN...")
         local_ip, remote_ip = utils.probe_ip_in_lan(
             port_local, port_remote, is_server)
 
@@ -560,12 +563,14 @@ def nat_tunnel_build(
             s.connect((remote_ip, port_remote))
             logging.info(
                 f"LAN tunnel {local_ip}:{port_local}=>{remote_ip}:{port_remote} ok")
+            return s
         else:
             s.bind(("0.0.0.0", port_local))
-            s.connect(tuple(peer_public_addr))
-            logging.info(
-                f"Nat-hairpin tunnel {local[0]}:{local[1]}=>{peer_public_addr[0]}:{peer_public_addr[1]} ok")
-        return s
+            if not disable_nat_hairpin:
+                s.connect(tuple(peer_public_addr))
+                logging.info(
+                    f"Nat-hairpin tunnel {local[0]}:{local[1]}=>{peer_public_addr[0]}:{peer_public_addr[1]} ok")
+                return s
 
     # 3. build tunnel
     logging.info(
@@ -782,13 +787,15 @@ def setup_p2p_vpn(instance_id):
     s = nat_tunnel_build(
         instance_id, server, args.port,
         args.port_range, args.user, token,
-        args.timeout)
+        args.timeout,
+        disable_nat_hairpin=args.disable_nat_hairpin)
     if not s:
         logging.error("NAT Tunnel build timeout!")
         s = nat_tunnel_build(
             instance_id, server, args.port,
             args.port_range, args.user, token,
             min(args.timeout, 30),
+            disable_nat_hairpin=args.disable_nat_hairpin,
             request_forward=True)
         if not s:
             logging.error("Forward Tunnel build timeout!")
