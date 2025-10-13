@@ -554,7 +554,7 @@ def nat_tunnel_build(
         port_remote = peer_local_addr[1]
         is_server = port_local > port_remote and public_addr[1] > peer_public_addr[1]
 
-        s.close()  # 让出本地端口，探测完重新创建
+        s.close()  # 让出本地端口，探测完重新创建并绑定
         logging.info(
             f"Checking peer={peer_public_addr[0]}:{peer_public_addr[1]} in same LAN...")
         local_ip, remote_ip = utils.probe_ip_in_lan(

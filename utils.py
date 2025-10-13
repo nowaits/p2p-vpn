@@ -23,15 +23,8 @@ def device_id():
 
 def alloc_local_udp_port():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        while True:
-            port = int(random.random()*65536)
-            try:
-                s.bind(("0.0.0.0", port))
-                return port
-            except OSError as e:
-                continue
-
-    return 0
+        s.bind(("0.0.0.0", 0))
+        return s.getsockname()[1]
 
 
 def local_udp_port_binded(port):
@@ -157,7 +150,7 @@ def check_ip_with_plen_equal(ip0, ip1, plen):
 
 def probe_ip_in_lan(local_port, remote_port, local_is_server):
     '''
-    使用UDP广播探测两个主机一个局域网下是否互通
+    使用UDP广播探测两个主机是否在一个局域网，并返回互通的IP对
     '''
     local_ips = get_all_ipv4()
     ss = {}
