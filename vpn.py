@@ -28,6 +28,9 @@ LOG_LEVELS = (
     logging.ERROR, logging.CRITICAL)
 LOG_CHOICES = list(map(lambda x: logging.getLevelName(x), LOG_LEVELS))
 
+args = None
+tun_fd = None
+instance_id = None
 
 def set_loggint_format(level):
     debug_info = " %(filename)s:%(lineno)d %(funcName)s"
@@ -46,7 +49,7 @@ def set_loggint_format(level):
     )
 
 
-def parse_args():
+def parse_args(argv=None):
     def str2bool(str):
         return True if str.lower() == 'true' else False
 
@@ -97,7 +100,7 @@ def parse_args():
         '--verbose', default=LOG_CHOICES[2],
         choices=LOG_CHOICES, help="log level default:%s" % (LOG_CHOICES[2]))
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 class PacketHeader():
@@ -135,7 +138,8 @@ def vpn_packet_unpack(p):
 class VPN(object):
 
     def __init__(self, tun, sock, show_status):
-        self._tun = TunTap(nic_type="Tun")
+        global tun_fd
+        self._tun = TunTap(nic_type="Tun", fd=tun_fd)
         self._tun.config(tun[0], tun[1], mtu=tun[2])
         assert sock != None
         self._sock = sock
@@ -808,11 +812,12 @@ def setup_p2p_vpn(instance_id):
     with VPN(tun, s, args.show_status) as v:
         v.run()
 
-
-if __name__ == '__main__':
-    args = parse_args()
+def vpn_main(paras=None):
+    global args
+    args = parse_args(paras)
     set_loggint_format(args.verbose)
 
+    global instance_id
     instance_id = utils.device_id()
 
     fail_try_time = 0
@@ -849,3 +854,22 @@ if __name__ == '__main__':
 
         # 避免无限失败请求
         time.sleep((fail_try_time + 1) * wait_time)
+
+# 由Android上层调用
+# TOMO:增加其他参数
+def android_main(server, server_key, user, password, vip, fd):
+    argv = [
+        "-s", server,
+        "--server-key", server_key,
+        "--user", user,
+        "--passwd", password,
+        "--vip", vip,
+        "--verbose", "INFO",
+    ]
+    global tun_fd
+    tun_fd = fd
+    vpn_main(argv)
+
+if __name__ == '__main__':
+    vpn_main()
+

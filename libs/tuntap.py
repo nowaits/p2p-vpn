@@ -40,11 +40,13 @@ class Packet(object):
         return self.data[16:20]
 
 
-def TunTap(nic_type):
-    if not sys.platform.startswith("win"):
-        tap = Tap(nic_type)
-    else:
+def TunTap(nic_type, fd=None):
+    if sys.platform.startswith("win"):
         tap = WinTap(nic_type)
+    elif sys.platform.startswith("android"):
+        tap = AndroidTap(nic_type, fd)
+    else:
+        tap = Tap(nic_type)
     tap.create()
     return tap
 
@@ -121,6 +123,33 @@ class Tap(object):
         except:
             return 0
 
+class AndroidTap(object):
+    def __init__(self, nic_type, fd):
+        self.nic_type = nic_type
+        self.handle = fd
+
+    def create(self):
+        return self
+
+    def _get_maskbits(self, mask):
+        #TOMO: android上层需要增加mask对应底层, 支持配置
+        return 24
+
+    def config(self, ip, mask, gateway="0.0.0.0", mtu=1400):
+        return self
+
+    def close(self):
+        self.quitting = False
+        os.close(self.handle)
+
+    def read(self, size=1522):
+        return os.read(self.handle, size)
+
+    def write(self, data):
+        try:
+            return os.write(self.handle, data)
+        except:
+            return 0
 
 class WinTap(Tap):
     def __init__(self, nic_type):
