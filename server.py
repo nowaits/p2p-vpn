@@ -275,7 +275,7 @@ class VPNRelay(object):
             for ins_id, ins in list(instance.items()):
                 if now - ins[2] > 2:  # record out of date
                     logging.info("Record: %s:%d out of date(%.2f)",
-                                 ins[0], ins[1], now - ins[2])
+                                 ins[0][0], ins[0][1], now - ins[2])
                     del instance[ins_id]
 
             items = list(instance.items())
