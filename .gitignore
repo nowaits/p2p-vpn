@@ -1,7 +1,4 @@
-build/
-.vscode/
 __pycache__
 *.swp
 *.spec
-dist
 *.log

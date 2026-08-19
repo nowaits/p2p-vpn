@@ -2,4 +2,4 @@
 ROOT_DIR=`realpath $(dirname $0)`
 cd $ROOT_DIR
 
-python3 ../server.py --server-key=test --verbose=INFO
+python3 ../server --server-key=test --verbose=INFO

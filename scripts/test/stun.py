@@ -10,6 +10,9 @@ log = logging.getLogger("pystun")
 
 
 stun_servers_list = (
+    ("stun.l.google.com", 19302),
+    ("stun.qq.com", 3478),
+    ("stun.miwifi.com", 3478),
     ("stun.internetcalls.com", 3478),
     ("stun.voip.aebc.com", 3478),
     ("stun1.l.google.com", 5432),

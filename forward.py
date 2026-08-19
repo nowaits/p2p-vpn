@@ -3,7 +3,6 @@ import socket
 import select
 import threading
 import logging
-import utils
 import argparse
 import os
 import time
@@ -17,6 +16,7 @@ SCRIPT = os.path.abspath(__file__)
 PWD = os.path.dirname(SCRIPT)
 IS_WIN = sys.platform.startswith("win")
 
+import libs  # noqa: E402
 
 assert sys.version_info >= (3, 6)
 
@@ -167,19 +167,19 @@ class STATS():
         msg1 = \
             "Rate(%s) Worker(%d): %d CLIENTS: %d/%d " \
             "RX-TX: %s/%s-%s/%s TOTAL: %s/%s" % (
-                utils.format_time_diff(alive),
+                libs.format_time_diff(alive),
                 STATS.restart_times,
                 len(STATS.workers.items()),
                 client_to_tunnel, tunnel_to_target,
 
-                utils.rate_format_str(rate_now[0]),
-                utils.rate_format_str(rate_avg[0]),
+                libs.rate_format_str(rate_now[0]),
+                libs.rate_format_str(rate_avg[0]),
 
-                utils.rate_format_str(rate_now[1]),
-                utils.rate_format_str(rate_avg[1]),
+                libs.rate_format_str(rate_now[1]),
+                libs.rate_format_str(rate_avg[1]),
 
-                utils.rate_format_str(rate_total[0]),
-                utils.rate_format_str(rate_total[1]))
+                libs.rate_format_str(rate_total[0]),
+                libs.rate_format_str(rate_total[1]))
 
         if tx_cache != 0 or rx_cache != 0:
             msg2 = " Cache: %d/%d" % (tx_cache, rx_cache)
@@ -216,8 +216,8 @@ class PortForwardWorker(object):
         self._tunnel_sock = tunnel_sock
         self._id = tunnel_sock.fileno()
         self._port_maps = {}
-        self._rx_rate = utils.Rate()
-        self._tx_rate = utils.Rate()
+        self._rx_rate = libs.Rate()
+        self._tx_rate = libs.Rate()
         # <fid, [tx cache, rx cache，client_idx, target_idx]>
         self._status = STATS.stats_max_idx * [0]
 
@@ -441,8 +441,8 @@ class PortForwardWorker(object):
                             if not IS_WIN:
                                 ip_option = create_ip_option(
                                     client_addr, client_port)
-                                s.setsockopt(socket.IPPROTO_IP,
-                                            socket.IP_OPTIONS, ip_option)
+                                s.setsockopt(
+                                    socket.IPPROTO_IP, socket.IP_OPTIONS, ip_option)
                             s.setblocking(False)
                             s.settimeout(30)
                             clients[k] = (
@@ -728,7 +728,7 @@ class PortForwardServer(PortForwardBase):
                     del r[0]
                     try:
                         # set tcp keepalive
-                        utils.set_keep_alive(c)
+                        libs.set_keep_alive(c)
                         la = c.getsockname()
 
                         if self._server_key:
@@ -885,7 +885,7 @@ class PortForwardClient(PortForwardBase):
         worker = None
         try:
             _e = None
-            utils.set_keep_alive(self._sock)
+            libs.set_keep_alive(self._sock)
 
             la = self._sock.getsockname()
             ra = self._sock.getpeername()
@@ -894,7 +894,7 @@ class PortForwardClient(PortForwardBase):
                 self.__do_auth()
 
             # set tcp keepalive
-            utils.set_keep_alive(self._sock)
+            libs.set_keep_alive(self._sock)
             logging.info(
                 "Client Forward session: %s:%d => %s:%d opened!",
                 la[0], la[1], ra[0], ra[1])

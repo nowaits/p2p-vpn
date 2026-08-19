@@ -19,32 +19,11 @@ else:
     import fcntl
 
 
-class Packet(object):
-    def __init__(self, data=None, frame=None):
-        if frame:
-            self.load(frame)
-            return
-        if data:
-            self.data = data
-
-    def load(self, frame):
-        self.data = frame[12+2:]
-
-    def get_version(self):
-        return self.data[0] >> 4
-
-    def get_src(self):
-        return self.data[12:16]
-
-    def get_dst(self):
-        return self.data[16:20]
-
-
-def TunTap(nic_type, fd=None):
+def TunTap(nic_type, tun_handle=None):
     if sys.platform.startswith("win"):
         tap = WinTap(nic_type)
     elif sys.platform.startswith("android"):
-        tap = AndroidTap(nic_type, fd)
+        tap = AndroidTap(nic_type, tun_handle)
     else:
         tap = Tap(nic_type)
     tap.create()
@@ -123,16 +102,17 @@ class Tap(object):
         except:
             return 0
 
+
 class AndroidTap(object):
-    def __init__(self, nic_type, fd):
+    def __init__(self, nic_type, tun_handle):
         self.nic_type = nic_type
-        self.handle = fd
+        self.handle = tun_handle
 
     def create(self):
         return self
 
     def _get_maskbits(self, mask):
-        #TOMO: android上层需要增加mask对应底层, 支持配置
+        # TOMO: android上层需要增加mask对应底层, 支持配置
         return 24
 
     def config(self, ip, mask, gateway="0.0.0.0", mtu=1400):
@@ -150,6 +130,7 @@ class AndroidTap(object):
             return os.write(self.handle, data)
         except:
             return 0
+
 
 class WinTap(Tap):
     def __init__(self, nic_type):
@@ -303,13 +284,15 @@ class WinTap(Tap):
         if self.gateway != "0.0.0.0":
             cmd += " gateway={self.gateway}"
         try:
-            subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call(
+                cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             if e.returncode != 1:  # 忽略已存在警告
                 raise
 
         cmd = f"netsh interface ipv4 set subinterface \"{self.name}\" mtu={mtu} store=persistent"
-        subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(
+            cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def read(self, size=1522):
         try:
@@ -339,6 +322,27 @@ class WinTap(Tap):
 
     def close(self):
         win32file.CloseHandle(self.handle)
+
+
+class Packet(object):
+    def __init__(self, data=None, frame=None):
+        if frame:
+            self.load(frame)
+            return
+        if data:
+            self.data = data
+
+    def load(self, frame):
+        self.data = frame[12+2:]
+
+    def get_version(self):
+        return self.data[0] >> 4
+
+    def get_src(self):
+        return self.data[12:16]
+
+    def get_dst(self):
+        return self.data[16:20]
 
 
 class Test(unittest.TestCase):

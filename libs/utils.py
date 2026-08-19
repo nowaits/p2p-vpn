@@ -10,7 +10,13 @@ import subprocess
 import re
 import ipaddress
 import select
+import errno
 
+def saferemove(l, item):
+    try:
+        l.remove(item)
+    except ValueError:
+        pass
 
 def random_str(l):
     return ''.join(random.sample(string.ascii_letters + string.digits, l))
@@ -140,6 +146,43 @@ def get_all_ipv4(include_loopback=False):
                 results.append((ip, plen))
 
     return results
+
+
+def socket_recv(s):
+    data = b''
+    try:
+        while True:
+            d = s.recv(2048)
+            if not d:
+                return False, None  # socket should close
+            data += d
+            if len(d) != 2048:
+                break
+    except BlockingIOError:
+        pass
+    except Exception as e:
+        print(e)
+        return False, None  # socket should close
+
+    return True, data
+
+
+def socket_send(s, d):
+    offset = 0
+    try:
+        sent = s.send(d[offset:])
+        offset += sent
+
+        if offset == len(d):
+            return True, b''
+    except BlockingIOError as e:
+        if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
+            return True, d[offset:]
+        else:
+            raise
+    except socket.error as e:
+        # should close
+        return False, d[offset:]
 
 
 def check_ip_with_plen_equal(ip0, ip1, plen):

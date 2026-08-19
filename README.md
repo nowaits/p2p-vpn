@@ -16,13 +16,13 @@
 ### 启动
 
 - C/S类型VPN，至少一方能访问另外一方
-    - server: `python vpn.py --cs-vpn --vip=10.0.0.1`
-    - client: `python vpn.py --cs-vpn -c -s=<server ip> --vip=10.0.0.2`
+    - server: `python vpn --cs-vpn --vip=10.0.0.1`
+    - client: `python vpn --cs-vpn -c -s=<server ip> --vip=10.0.0.2`
 
 - NAT穿越类型VPN，需要借助公网服务器转发对方出口地址
-    - 公网服务器：`python server.py -p=<server port>`
-    - client A: `python vpn.py -s=<server ip> -p=<server port> --user=<name> --passwd=<passwd> --vip=10.0.0.1`
-    - client B: `python vpn.py -s=<server ip> -p=<server port> --user=<name> --passwd=<passwd> --vip=10.0.0.2`
+    - 公网服务器：`python server -p=<server port>`
+    - client A: `python vpn -s=<server ip> -p=<server port> --user=<name> --passwd=<passwd> --vip=10.0.0.1`
+    - client B: `python vpn -s=<server ip> -p=<server port> --user=<name> --passwd=<passwd> --vip=10.0.0.2`
 
 - 用户密码认证过程
     ```
@@ -36,24 +36,12 @@
     ```
 
 - 以服务形式运行: `添加参数：--run-as-service`
-- 更多参考:`python vpn.py -h`
-
-### 打包
-
-- 使用pyinstaller打包
-    - 安装依赖:`pip install pyinstaller`
-    - 打包:`pyinstaller -F vpn.py`
-
-### 其它
-
-- 查看出口NAT类型：`python libs/stun.py`
-    - 已经内置了免费stun服务器列表
-- 删除tun网卡: `ip link del tap0`
+- 更多参考:`python vpn -h`
 
 ### TODO
 
-1. 创建windows服务
-2. 发送Ctrl+C中断: `kill -SIGINT $pid`
+1. vpn多实例
+2. 流量加密
 
 ### DOC
 
