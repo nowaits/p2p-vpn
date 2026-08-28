@@ -514,6 +514,20 @@ class VPNServer(object):
             del self._tcp_clients[user]
             return
 
+        if instance_id in client["instance"]:
+            old = client["instance"][instance_id]
+            if old["local-soc-fd"] != fd:
+                #
+                # 清理旧信息
+                #
+
+                # 1. forward tables
+                if fd in self._tcp_forward_table:
+                    assert "peer-soc-fd" in old
+                    del self._tcp_forward_table[fd]
+                    del self._tcp_forward_table[old["peer-soc-fd"]]
+                    logging.info(f"clean old tcp-forward info")
+
         local = {
             "local-soc-fd": fd,
             "public-addr": addr[0], "public-port": addr[1],
@@ -611,6 +625,7 @@ class VPNServer(object):
             forward = self._tcp_forward_table[fd]
             peer_fd = forward["peer-soc-fd"]
             assert peer_fd in self._sock_info
+            assert peer_fd in self._tcp_forward_table
 
             peer_sock = self._sock_info[peer_fd]["sock"]
 

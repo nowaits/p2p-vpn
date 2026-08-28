@@ -169,20 +169,18 @@ def socket_recv(s):
 
 def socket_send(s, d):
     offset = 0
+    ok = False
     try:
         sent = s.send(d[offset:])
         offset += sent
-
-        if offset == len(d):
-            return True, b''
+        ok = True
     except BlockingIOError as e:
         if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
-            return True, d[offset:]
+            ok = True
         else:
             raise
-    except socket.error as e:
-        # should close
-        return False, d[offset:]
+    finally:
+        return ok, d[offset:]
 
 
 def check_ip_with_plen_equal(ip0, ip1, plen):
