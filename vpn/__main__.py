@@ -567,10 +567,10 @@ def setup_p2p_vpn(conf):
             # @note: 多次重试说明
             #   由于tcp限制更严格，两端发起打洞先后次序决定是否成功，所以需要尝试多次
             #
-            s = nat_tunnel_build_tcp(conf, token)
+            s, is_p2p = nat_tunnel_build_tcp(conf, token)
             if s:
                 vpn_tunnel_mgr.is_tcp = True
-                vpn_tunnel_mgr.is_p2p = True
+                vpn_tunnel_mgr.is_p2p = is_p2p
                 return s
             logging.warning(f"NAT TCP tunnel connect {t + 1}/{3} timeout")
 
@@ -585,10 +585,10 @@ def setup_p2p_vpn(conf):
         if udp_last_delay >= vpn_tunnel_mgr.delay_max:
             return None
 
-        s = nat_tunnel_build_udp(conf, token)
+        s, is_p2p = nat_tunnel_build_udp(conf, token)
         if s:
             vpn_tunnel_mgr.is_tcp = False
-            vpn_tunnel_mgr.is_p2p = True
+            vpn_tunnel_mgr.is_p2p = is_p2p
             return s
         else:
             logging.error("NAT TCP Tunnel build timeout!")
@@ -603,18 +603,18 @@ def setup_p2p_vpn(conf):
 
     # 3. try tcp forward
     if not s:
-        s = nat_tunnel_build_tcp(conf, token, True)
+        s, is_p2p = nat_tunnel_build_tcp(conf, token, True)
         if s:
             vpn_tunnel_mgr.is_tcp = True
-            vpn_tunnel_mgr.is_p2p = False
+            vpn_tunnel_mgr.is_p2p = is_p2p
 
     # 4. try udp forward
     if not s:
         logging.error("TCP forward build timeout!")
-        s = nat_tunnel_build_udp(conf, token, True)
+        s, is_p2p = nat_tunnel_build_udp(conf, token, True)
         if s:
             vpn_tunnel_mgr.is_tcp = False
-            vpn_tunnel_mgr.is_p2p = False
+            vpn_tunnel_mgr.is_p2p = is_p2p
 
     if not s:
         logging.error("UDP forward build timeout!")

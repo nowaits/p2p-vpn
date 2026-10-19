@@ -72,7 +72,7 @@ def nat_tunnel_build_udp(conf, token, request_forward=False):
                     "(peer request) " if not request_forward else "",
                     public_addr[0], public_addr[1], peer_public_addr[0], peer_public_addr[1])
                 s.connect((conf.server_ip, conf.port))
-                return s
+                return s, False
 
         if s in w:
             content = {
@@ -86,7 +86,7 @@ def nat_tunnel_build_udp(conf, token, request_forward=False):
         if time.time() - start_time > timeout:
             logging.error("Get peer info timeout(%ds)", timeout)
             s.close()
-            return None
+            return None, False
 
         if not r and not w:
             ws.append(s)
@@ -134,7 +134,7 @@ def nat_tunnel_build_udp(conf, token, request_forward=False):
                 ack_time -= 1
                 if ack_time == 0:
                     logging.info(f"UDP Tunnel ok! peer:{addr[0]}:{addr[1]}")
-                    return s
+                    return s, True
 
         if s in r:
             d, addr = s.recvfrom(2048)
@@ -153,7 +153,7 @@ def nat_tunnel_build_udp(conf, token, request_forward=False):
                         elif ds[1] == "nat-resp":
                             logging.info(
                                 f"UDP Tunnel ok! peer:{addr[0]}:{addr[1]} try times:{try_times}")
-                            return s
+                            return s, True
                         else:
                             logging.warning(f"Unknow tunnel msg: {p}")
                     else:
@@ -177,4 +177,4 @@ def nat_tunnel_build_udp(conf, token, request_forward=False):
             logging.error(f"Build udp tunnel timeout!(try times:{try_times})")
             break
     s.close()
-    return None
+    return None, False

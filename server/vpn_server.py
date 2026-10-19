@@ -573,6 +573,7 @@ class VPNServer(object):
         if info["action"] == "request-forward" or \
                 peer_fd in self._tcp_forward_table:
             do_forward = True
+            assert fd != peer_fd
             self._tcp_forward_table[fd] = {
                 "peer-addr": peer["public-addr"],
                 "peer-port": peer["public-port"],
@@ -624,6 +625,7 @@ class VPNServer(object):
             #
             forward = self._tcp_forward_table[fd]
             peer_fd = forward["peer-soc-fd"]
+            assert fd != peer_fd
             assert peer_fd in self._sock_info
             assert peer_fd in self._tcp_forward_table
 

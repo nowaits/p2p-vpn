@@ -51,7 +51,7 @@ def nat_tunnel_build_tcp(conf, token, request_forward=False):
             s = None
 
     if not s:
-        return None
+        return None, False
 
     s.setblocking(False)
     timeout = conf.timeout
@@ -76,7 +76,7 @@ def nat_tunnel_build_tcp(conf, token, request_forward=False):
             if not valid:
                 s.close()
                 logging.info(f"connecting server failed!")
-                return None
+                return None, False
 
             ok, ps, recv_left = \
                 libs.packet_unpack_all(recv_left + d)
@@ -121,7 +121,7 @@ def nat_tunnel_build_tcp(conf, token, request_forward=False):
                         "TCP Forward %stunnel %s:%d=>%s:%d ok",
                         "(peer request) " if not request_forward else "",
                         public_addr[0], public_addr[1], peer_public_addr[0], peer_public_addr[1])
-                    return s
+                    return s, False
 
         if s in w:
             content = json.dumps({
@@ -134,14 +134,14 @@ def nat_tunnel_build_tcp(conf, token, request_forward=False):
             ok, left = libs.socket_send(s, d)
             if not ok:
                 logging.warning(f"peer closed\n{content}")
-                return None
+                return None, False
 
             assert not left
 
         if time.time() - start_time > timeout:
             logging.error("Get peer info timeout(%ds)", timeout)
             s.close()
-            return None
+            return None, False
 
         if not r and not w:
             ws = [s]
@@ -283,4 +283,4 @@ def nat_tunnel_build_tcp(conf, token, request_forward=False):
             select_timeout = t
 
     sock_cleanup()
-    return tunnel_sock
+    return tunnel_sock, True
