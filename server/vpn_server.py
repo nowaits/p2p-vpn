@@ -6,6 +6,7 @@ import json
 import hashlib
 import hmac
 import libs
+import socket
 
 assert sys.version_info >= (3, 6)
 
@@ -146,6 +147,8 @@ class VPNServer(object):
         {
             "3": {
                 "public-addr": ["10.0.0.200", 32452],
+                "user": "",
+                "instance_id": "",
                 "data": {
                     "rx-left": b'',
                     "tx-left": b'',
@@ -534,6 +537,13 @@ class VPNServer(object):
             "time": now, "id": instance_id
         }
         client["instance"][instance_id] = local
+        if not sock_info["user"]:
+            sock_info["user"] = user
+            assert not sock_info["instance_id"]
+            sock_info["instance_id"] = instance_id
+        else:
+            assert sock_info["user"] == user
+            assert sock_info["instance_id"] == instance_id
 
         # 1. remove timeout
         for ins_id, ins in list(client["instance"].items()):
@@ -611,14 +621,30 @@ class VPNServer(object):
         peer_sock_info["data"]["tx-left"] += libs.packet_pack(
             local_info, libs.PacketHeader.control)
 
-    def __remove_client_socket(self, s, peer_sock_remove_cb):
+    def __remove_tcp_client_socket(self, s, peer_sock_remove_cb):
         fd = s.fileno()
+        assert s.type == socket.SOCK_STREAM
         assert fd in self._sock_info
         assert s in self._rx_socks
 
         sock_info = self._sock_info[fd]
 
-        logging.info(f"socket {sock_info["public-addr"]}: remove")
+        if sock_info["user"] and sock_info["user"] in self._tcp_clients:
+            user = sock_info["user"]
+
+            client = self._tcp_clients[user]
+
+            assert sock_info["instance_id"]
+            ins_id = sock_info["instance_id"]
+            assert ins_id in client["instance"]
+            #
+            # 删除与socket相关的实例
+            #
+            logging.info(f"user {user}-{client["instance"][ins_id]} removed")
+            del client["instance"][ins_id]
+        else:
+            logging.info(f"socket {sock_info["public-addr"]}: remove")
+
         if fd in self._tcp_forward_table:
             #
             # tcp转发会话断开，释放转发隧道
@@ -685,6 +711,8 @@ class VPNServer(object):
 
                     self._sock_info[cs.fileno()] = {
                         "public-addr": addr,
+                        "user": "",
+                        "instance_id": "",
                         "data": {
                             "rx-left": b'',
                             "tx-left": b'',
@@ -701,7 +729,7 @@ class VPNServer(object):
                     sock_info = self._sock_info[fd]
 
                     if not valid:
-                        self.__remove_client_socket(
+                        self.__remove_tcp_client_socket(
                             s, lambda peer_sock: libs.saferemove(w, peer_sock))
                         libs.saferemove(w, s)
                         continue
@@ -717,8 +745,9 @@ class VPNServer(object):
                         libs.packet_unpack_all(
                             sock_info["data"]["rx-left"] + d)
                     if not ok:
-                        logging.warning(f"packet format error {d}")
-                        self.__remove_client_socket(
+                        logging.warning(
+                            f"packet format error {d} from {sock_info["public-addr"]}")
+                        self.__remove_tcp_client_socket(
                             s, lambda peer_sock: libs.saferemove(w, peer_sock))
                         libs.saferemove(w, s)
                         continue
@@ -730,12 +759,14 @@ class VPNServer(object):
                 if fd not in self._sock_info:
                     continue
 
+                assert s.type == socket.SOCK_STREAM
                 sock_info = self._sock_info[fd]
                 if sock_info["data"]["tx-left"]:
                     ok, left = libs.socket_send(
                         s, sock_info["data"]["tx-left"])
                     if not ok:
-                        logging.warning(f"socket send error {sock_info["data"]["tx-left"]}")
+                        logging.warning(
+                            f"socket send error {sock_info["data"]["tx-left"]}")
                     sock_info["data"]["tx-left"] = left
 
             for _, sock_info in self._sock_info.items():
